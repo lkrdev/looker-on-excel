@@ -61,11 +61,14 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
             onChange={(_, data) => onModelChange(data.value)}
           >
             <option value="">-- Select a Model --</option>
-            {models.map((m) => (
-              <option key={m.name} value={m.name}>
-                {m.label || m.name}
-              </option>
-            ))}
+            {models.map((m) => {
+              const label = m.label || m.name;
+              return (
+                <option key={m.name} value={m.name}>
+                  {`${label} - ${m.name}`}
+                </option>
+              );
+            })}
           </Select>
         )}
       </div>

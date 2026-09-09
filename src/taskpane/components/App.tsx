@@ -443,6 +443,10 @@ export const App: React.FC = () => {
                   onAddFilter={handleAddFilter}
                   onUpdateFilter={handleUpdateFilter}
                   onRemoveFilter={handleRemoveFilter}
+                  baseUrl={auth?.baseUrl}
+                  token={auth?.accessToken}
+                  modelName={selectedModel}
+                  exploreName={selectedExplore}
                 />
 
                 <TableSettings

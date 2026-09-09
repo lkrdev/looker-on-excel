@@ -12,12 +12,17 @@ export interface ModelSummary {
 export interface FieldDefinition {
   name: string;
   label: string;
+  label_short?: string;
   view_label?: string;
   type?: string;
   value_format?: string | null;
   value_format_name?: string | null;
   description?: string | null;
   category?: "dimension" | "measure" | "parameter";
+  field_group_label?: string | null;
+  field_group_variant?: string | null;
+  dimension_group?: string | null;
+  group_label?: string | null;
 }
 
 export interface ParameterDefinition {
@@ -84,7 +89,7 @@ export async function getExplore(
   explore: string
 ): Promise<ExploreDetail> {
   const fields =
-    "id,name,label,always_filter,conditionally_filter,fields(dimensions(name,label,type,value_format,value_format_name,view_label,description),measures(name,label,type,value_format,value_format_name,view_label,description),parameters(name,label,type,default_value))";
+    "id,name,label,always_filter,conditionally_filter,fields(dimensions(name,label,label_short,type,value_format,value_format_name,view_label,description,field_group_label,field_group_variant,dimension_group),measures(name,label,label_short,type,value_format,value_format_name,view_label,description,field_group_label,field_group_variant),parameters(name,label,type,default_value))";
   const url = `${baseUrl.replace(/\/$/, "")}/api/4.0/lookml_models/${encodeURIComponent(model)}/explores/${encodeURIComponent(explore)}?fields=${encodeURIComponent(fields)}`;
 
   const res = await fetch(url, {
@@ -109,24 +114,38 @@ export async function getExplore(
 }
 
 /**
- * Fetches dynamic suggestions for filter inputs.
+ * Retrieves field suggestions for a specific explore and field.
+ * GET /api/4.0/models/{model_name}/views/{view_name}/fields/{field_name}/suggestions
  */
 export async function getFieldSuggestions(
   baseUrl: string,
   token: string,
-  model: string,
-  explore: string,
-  field: string
+  modelName: string,
+  exploreName: string,
+  fieldName: string,
+  term?: string
 ): Promise<string[]> {
-  const url = `${baseUrl.replace(/\/$/, "")}/api/4.0/lookml_models/${encodeURIComponent(model)}/explores/${encodeURIComponent(explore)}/fields/${encodeURIComponent(field)}/suggestions`;
   try {
+    const root = baseUrl.replace(/\/$/, "");
+    const query = term ? `?term=${encodeURIComponent(term)}` : "";
+    const url = `${root}/api/4.0/models/${encodeURIComponent(modelName)}/views/${encodeURIComponent(exploreName)}/fields/${encodeURIComponent(fieldName)}/suggestions${query}`;
+
     const res = await fetch(url, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
     });
-    if (!res.ok) return [];
+
+    if (!res.ok) {
+      return [];
+    }
+
     const data = await res.json();
-    return data.suggestions || [];
-  } catch {
+    return Array.isArray(data?.suggestions) ? data.suggestions : [];
+  } catch (e) {
+    console.warn("Failed to fetch field suggestions:", e);
     return [];
   }
 }
+
