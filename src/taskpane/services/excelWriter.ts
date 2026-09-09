@@ -12,6 +12,8 @@ export interface WriteOptions {
   autoExpandFormulas?: boolean;
   freezeHeader?: boolean;
   nullDisplay?: string;
+  destination?: "active" | "new";
+  sheetName?: string;
 }
 
 export async function writeLookerDataToWorksheet(
@@ -27,7 +29,30 @@ export async function writeLookerDataToWorksheet(
   const nullVal = options.nullDisplay ?? "";
 
   await Excel.run(async (context) => {
-    const sheet = context.workbook.worksheets.getActiveWorksheet();
+    let sheet: Excel.Worksheet;
+
+    // Resolve target worksheet based on destination option
+    if (options.destination === "new") {
+      const sheets = context.workbook.worksheets;
+      sheets.load(["items/name"]);
+      await context.sync();
+
+      const existingNames = sheets.items.map((s) => s.name);
+      const rawName = (options.sheetName || "Looker Data").replace(/[\\/?*:[\]]/g, "").trim();
+      const baseName = rawName.slice(0, 25) || "Looker Data";
+      let targetName = baseName;
+      let counter = 1;
+      while (existingNames.some((n) => n.toLowerCase() === targetName.toLowerCase())) {
+        targetName = `${baseName.slice(0, 20)} (${counter})`;
+        counter++;
+      }
+
+      sheet = context.workbook.worksheets.add(targetName);
+      sheet.activate();
+      await context.sync();
+    } else {
+      sheet = context.workbook.worksheets.getActiveWorksheet();
+    }
     const app = context.workbook.application;
 
     // 1. Suspend costly calculation & grid repainting
@@ -125,16 +150,32 @@ export async function writeLookerDataToWorksheet(
       }
     }
 
-    // 8. Native Excel Table (ListObject)
-    if (options.useExcelTable && totalRows > 0) {
-      try {
+    // 8. Native Excel Table (ListObject) handling
+    try {
+      const existingTables = sheet.tables;
+      existingTables.load(["items/name"]);
+      await context.sync();
+
+      if (existingTables.items.length > 0) {
+        for (const t of existingTables.items) {
+          try {
+            t.convertToRange();
+          } catch (e) {
+            console.warn("Could not convert existing table to range:", e);
+          }
+        }
+        await context.sync();
+      }
+
+      if (options.useExcelTable && totalRows > 0) {
         const fullRange = sheet.getRangeByIndexes(0, 0, totalRows + 1, colCount);
         const table = sheet.tables.add(fullRange, true /* hasHeaders */);
         table.name = `Looker_${Date.now().toString().slice(-6)}`;
         table.style = options.tableStyle || "TableStyleLight1";
-      } catch {
-        // Table might already exist on sheet; continue
+        await context.sync();
       }
+    } catch (err) {
+      console.warn("Could not configure native Excel table (ListObject):", err);
     }
 
     // 9. Restore calculation mode

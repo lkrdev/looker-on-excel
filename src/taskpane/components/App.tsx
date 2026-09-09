@@ -1,11 +1,25 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { makeStyles, tokens, Spinner, MessageBar, MessageBarBody } from "@fluentui/react-components";
+import {
+  makeStyles,
+  tokens,
+  Spinner,
+  MessageBar,
+  MessageBarBody,
+  MessageBarActions,
+  Button,
+} from "@fluentui/react-components";
+import { DismissRegular } from "@fluentui/react-icons";
 import { Header } from "./Header";
 import { AuthView } from "./AuthView";
 import { ModelSelector } from "./ModelSelector";
 import { PromptsDialog } from "./PromptsDialog";
 import { FieldPicker } from "./FieldPicker";
-import { FilterBuilder, FilterCondition } from "./FilterBuilder";
+import {
+  FilterBuilder,
+  FilterCondition,
+  compileFilterToLookerExpression,
+  isDateField,
+} from "./FilterBuilder";
 import { TableSettings } from "./TableSettings";
 import { ExecutionBar } from "./ExecutionBar";
 import { RefreshView } from "./RefreshView";
@@ -198,8 +212,26 @@ export const App: React.FC = () => {
   // Filter handlers
   const handleAddFilter = () => {
     const newId = Date.now().toString();
-    const firstField = exploreDetail?.fields.dimensions[0]?.name || "";
-    setFilters((prev) => [...prev, { id: newId, field: firstField, operator: "is", value: "" }]);
+    const allFields = exploreDetail
+      ? [...exploreDetail.fields.dimensions, ...exploreDetail.fields.measures]
+      : [];
+    const firstFieldDef = allFields[0];
+    const firstField = firstFieldDef?.name || "";
+
+    let defaultOp = "is";
+    let defaultValue = "";
+    let defaultUnit: string | undefined = undefined;
+
+    if (isDateField(firstFieldDef)) {
+      defaultOp = "is_in_the_last";
+      defaultValue = "7";
+      defaultUnit = "days";
+    }
+
+    setFilters((prev) => [
+      ...prev,
+      { id: newId, field: firstField, operator: defaultOp, value: defaultValue, unit: defaultUnit },
+    ]);
   };
 
   const handleUpdateFilter = (id: string, updates: Partial<FilterCondition>) => {
@@ -220,17 +252,20 @@ export const App: React.FC = () => {
     setErrorMessage(null);
 
     try {
-      // 1. Compile filters
+      // 1. Prepare fields lookup & compile filters
+      const allAvailableFields = [
+        ...exploreDetail.fields.dimensions,
+        ...exploreDetail.fields.measures,
+      ];
+
       const compiledFilters: Record<string, string> = { ...promptValues };
       filters.forEach((f) => {
-        if (f.field && f.value) {
-          if (f.operator === "is_not") compiledFilters[f.field] = `-${f.value}`;
-          else if (f.operator === "contains") compiledFilters[f.field] = `%${f.value}%`;
-          else if (f.operator === "before") compiledFilters[f.field] = `before ${f.value}`;
-          else if (f.operator === "after") compiledFilters[f.field] = `after ${f.value}`;
-          else if (f.operator === "greater_than") compiledFilters[f.field] = `>${f.value}`;
-          else if (f.operator === "less_than") compiledFilters[f.field] = `<${f.value}`;
-          else compiledFilters[f.field] = f.value;
+        if (f.field) {
+          const def = allAvailableFields.find((fld) => fld.name === f.field);
+          const expr = compileFilterToLookerExpression(f, def);
+          if (expr !== null && expr !== undefined && expr !== "") {
+            compiledFilters[f.field] = expr;
+          }
         }
       });
 
@@ -244,10 +279,6 @@ export const App: React.FC = () => {
       };
 
       // 2. Prepare column metadata with number formats
-      const allAvailableFields = [
-        ...exploreDetail.fields.dimensions,
-        ...exploreDetail.fields.measures,
-      ];
       const columns: ColumnDefinition[] = selectedFields.map((fieldKey) => {
         const def = allAvailableFields.find((f) => f.name === fieldKey);
         return {
@@ -268,7 +299,12 @@ export const App: React.FC = () => {
 
       // 4. Stream to Excel
       setStatusText(`Streaming ${dataRows.length.toLocaleString()} rows into worksheet...`);
-      await writeLookerDataToWorksheet(columns, dataRows, tableOptions, (pct) => {
+      const writeOptions: WriteOptions = {
+        ...tableOptions,
+        destination,
+        sheetName: exploreDetail.label || selectedExplore || "Looker Data",
+      };
+      await writeLookerDataToWorksheet(columns, dataRows, writeOptions, (pct) => {
         setProgressPercent(pct);
       });
 
@@ -276,7 +312,7 @@ export const App: React.FC = () => {
       const config: StoredSheetConfig = {
         queryPayload,
         columns,
-        options: tableOptions,
+        options: writeOptions,
         lastRefreshed: new Date().toISOString(),
         rowCount: dataRows.length,
         modelLabel: models.find((m) => m.name === selectedModel)?.label,
@@ -318,7 +354,7 @@ export const App: React.FC = () => {
       await writeLookerDataToWorksheet(
         sheetConfig.columns,
         dataRows,
-        sheetConfig.options,
+        { ...sheetConfig.options, destination: "active" },
         (pct) => setProgressPercent(pct)
       );
 
@@ -383,6 +419,16 @@ export const App: React.FC = () => {
       {errorMessage && (
         <MessageBar intent="error" style={{ margin: "8px 16px" }}>
           <MessageBarBody>{errorMessage}</MessageBarBody>
+          <MessageBarActions
+            containerAction={
+              <Button
+                appearance="subtle"
+                aria-label="Dismiss error"
+                icon={<DismissRegular />}
+                onClick={() => setErrorMessage(null)}
+              />
+            }
+          />
         </MessageBar>
       )}
 
