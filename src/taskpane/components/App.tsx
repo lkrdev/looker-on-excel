@@ -24,7 +24,7 @@ import { TableSettings } from "./TableSettings";
 import { ExecutionBar } from "./ExecutionBar";
 import { RefreshView } from "./RefreshView";
 
-import { getStoredAuth, clearAuth, AuthTokens } from "../services/lookerAuth";
+import { getStoredAuth, clearAuth, ensureValidToken, AuthTokens } from "../services/lookerAuth";
 import {
   getModels,
   getExplore,
@@ -84,6 +84,8 @@ export const App: React.FC = () => {
 
   // Query Builder state
   const [selectedFields, setSelectedFields] = useState<string[]>([]);
+  const [sorts, setSorts] = useState<string[]>([]);
+  const [pivots, setPivots] = useState<string[]>([]);
   const [filters, setFilters] = useState<FilterCondition[]>([]);
   const [promptValues, setPromptValues] = useState<Record<string, string>>({});
   const [rowLimit, setRowLimit] = useState<string>("5000");
@@ -179,9 +181,15 @@ export const App: React.FC = () => {
       .then((data) => {
         setExploreDetail(data);
 
-        // Pre-select first 4 dimensions if none selected
-        if (selectedFields.length === 0 && data.fields.dimensions.length > 0) {
-          setSelectedFields(data.fields.dimensions.slice(0, 4).map((d) => d.name));
+        // Pre-fill defaults for any required always_filter
+        if (data.always_filter && data.always_filter.length > 0) {
+          const initialPrompts: Record<string, string> = {};
+          data.always_filter.forEach((af) => {
+            if (af.values && af.values.length > 0) {
+              initialPrompts[af.field] = af.values.join(", ");
+            }
+          });
+          setPromptValues(initialPrompts);
         }
       })
       .catch((e) => setErrorMessage(`Failed to load explore fields: ${e.message}`))
@@ -200,13 +208,102 @@ export const App: React.FC = () => {
     setUser(null);
     setModels([]);
     setExploreDetail(null);
+    setSelectedFields([]);
+    setSorts([]);
+    setPivots([]);
+    setFilters([]);
+    setPromptValues({});
   };
 
-  // Field selection handlers
+  // Field selection, sort, and pivot handlers
   const handleToggleField = (fieldName: string) => {
-    setSelectedFields((prev) =>
-      prev.includes(fieldName) ? prev.filter((f) => f !== fieldName) : [...prev, fieldName]
+    setSelectedFields((prev) => {
+      const exists = prev.includes(fieldName);
+      if (exists) {
+        setSorts((s) => s.filter((x) => x !== fieldName && !x.startsWith(`${fieldName} `)));
+        setPivots((p) => p.filter((x) => x !== fieldName));
+        return prev.filter((f) => f !== fieldName);
+      }
+      return [...prev, fieldName];
+    });
+  };
+
+  const handleClearSelected = () => {
+    setSelectedFields([]);
+    setSorts([]);
+    setPivots([]);
+  };
+
+  const handleToggleSort = (fieldName: string) => {
+    setSorts((prev) => {
+      const existingIndex = prev.findIndex((s) => s === fieldName || s.startsWith(`${fieldName} `));
+      if (existingIndex === -1) {
+        // Not sorted -> sort ASC
+        return [...prev, `${fieldName} asc`];
+      }
+      const current = prev[existingIndex];
+      if (current === fieldName || current === `${fieldName} asc`) {
+        // ASC -> DESC
+        const updated = [...prev];
+        updated[existingIndex] = `${fieldName} desc`;
+        return updated;
+      }
+      // DESC -> remove sort
+      return prev.filter((_, idx) => idx !== existingIndex);
+    });
+  };
+
+  const handleTogglePivot = (fieldName: string) => {
+    setPivots((prev) =>
+      prev.includes(fieldName) ? prev.filter((p) => p !== fieldName) : [...prev, fieldName]
     );
+  };
+
+  // Hydrate query builder from stored sheet metadata (Edit Query workflow)
+  const handleEditQuery = (config: StoredSheetConfig) => {
+    setSelectedModel(config.queryPayload.model);
+    setSelectedExplore(config.queryPayload.view);
+    setSelectedFields(config.queryPayload.fields || []);
+    setSorts(config.queryPayload.sorts || []);
+    setPivots(config.queryPayload.pivots || []);
+    setRowLimit(config.queryPayload.limit || "5000");
+    if (config.options) {
+      setTableOptions(config.options);
+      setDestination("active");
+    }
+
+    if (config.queryPayload.filters) {
+      const restoredPrompts: Record<string, string> = {};
+      const restoredFilters: FilterCondition[] = [];
+      Object.entries(config.queryPayload.filters).forEach(([field, expr], idx) => {
+        restoredPrompts[field] = expr;
+        restoredFilters.push({
+          id: `${Date.now()}_${idx}`,
+          field,
+          operator: "is",
+          value: expr,
+        });
+      });
+      setPromptValues(restoredPrompts);
+      setFilters(restoredFilters);
+    } else {
+      setPromptValues({});
+      setFilters([]);
+    }
+
+    setActiveView("builder");
+  };
+
+  // Start fresh query from scratch, defaulting destination to new sheet to protect existing tables
+  const handleStartNewQuery = () => {
+    setSheetConfig(null);
+    setSelectedFields([]);
+    setSorts([]);
+    setPivots([]);
+    setFilters([]);
+    setPromptValues({});
+    setDestination("new");
+    setActiveView("builder");
   };
 
   // Filter handlers
@@ -247,18 +344,40 @@ export const App: React.FC = () => {
     if (!auth || !exploreDetail || selectedFields.length === 0) return;
 
     setIsExecuting(true);
-    setStatusText("Submitting query task to Looker...");
+    setStatusText("Verifying session and submitting query...");
     setProgressPercent(0);
     setErrorMessage(null);
 
     try {
+      // 0. Ensure fresh token before executing query
+      const validAuth = await ensureValidToken(auth);
+      if (validAuth.accessToken !== auth.accessToken) {
+        setAuth(validAuth);
+      }
+
       // 1. Prepare fields lookup & compile filters
       const allAvailableFields = [
         ...exploreDetail.fields.dimensions,
         ...exploreDetail.fields.measures,
       ];
 
-      const compiledFilters: Record<string, string> = { ...promptValues };
+      // Only include prompt / parameter entries that have actual non-empty values
+      const compiledFilters: Record<string, string> = {};
+      Object.entries(promptValues).forEach(([k, v]) => {
+        if (v !== undefined && v !== null && v.trim() !== "") {
+          compiledFilters[k] = v.trim();
+        }
+      });
+
+      // Ensure any always_filter has its default applied if not explicitly set in promptValues
+      if (exploreDetail.always_filter) {
+        exploreDetail.always_filter.forEach((af) => {
+          if (!compiledFilters[af.field] && af.values && af.values.length > 0) {
+            compiledFilters[af.field] = af.values.join(", ");
+          }
+        });
+      }
+
       filters.forEach((f) => {
         if (f.field) {
           const def = allAvailableFields.find((fld) => fld.name === f.field);
@@ -274,8 +393,9 @@ export const App: React.FC = () => {
         view: selectedExplore,
         fields: selectedFields,
         filters: Object.keys(compiledFilters).length > 0 ? compiledFilters : null,
-        sorts: [],
+        sorts: sorts.length > 0 ? sorts : [],
         limit: rowLimit,
+        pivots: pivots.length > 0 ? pivots : null,
       };
 
       // 2. Prepare column metadata with number formats
@@ -339,9 +459,14 @@ export const App: React.FC = () => {
     setErrorMessage(null);
 
     try {
+      const validAuth = await ensureValidToken(auth);
+      if (validAuth.accessToken !== auth.accessToken) {
+        setAuth(validAuth);
+      }
+
       const controller = await runQueryTask(
-        auth.baseUrl,
-        auth.accessToken,
+        validAuth.baseUrl,
+        validAuth.accessToken,
         sheetConfig.queryPayload
       );
       activeTaskRef.current = controller;
@@ -438,11 +563,8 @@ export const App: React.FC = () => {
         <RefreshView
           config={sheetConfig}
           onRefresh={handleRefreshActive}
-          onEdit={() => setActiveView("builder")}
-          onNewQuery={() => {
-            setSheetConfig(null);
-            setActiveView("builder");
-          }}
+          onEdit={() => handleEditQuery(sheetConfig)}
+          onNewQuery={handleStartNewQuery}
           isRefreshing={isExecuting}
           statusText={statusText}
           progressPercent={progressPercent}
@@ -456,12 +578,27 @@ export const App: React.FC = () => {
               selectedExplore={selectedExplore}
               onModelChange={(m) => {
                 setSelectedModel(m);
+                setSelectedFields([]);
+                setSorts([]);
+                setPivots([]);
+                setFilters([]);
+                setPromptValues({});
                 const modelObj = models.find((mod) => mod.name === m);
                 if (modelObj && modelObj.explores.length > 0) {
                   setSelectedExplore(modelObj.explores[0].name);
+                } else {
+                  setSelectedExplore("");
+                  setExploreDetail(null);
                 }
               }}
-              onExploreChange={setSelectedExplore}
+              onExploreChange={(exp) => {
+                setSelectedExplore(exp);
+                setSelectedFields([]);
+                setSorts([]);
+                setPivots([]);
+                setFilters([]);
+                setPromptValues({});
+              }}
               loadingModels={loadingModels}
               loadingExplore={loadingExplore}
             />
@@ -480,7 +617,12 @@ export const App: React.FC = () => {
                   measures={exploreDetail.fields.measures}
                   selectedFields={selectedFields}
                   onToggleField={handleToggleField}
-                  onClearSelected={() => setSelectedFields([])}
+                  onClearSelected={handleClearSelected}
+                  sorts={sorts}
+                  onToggleSort={handleToggleSort}
+                  pivots={pivots}
+                  onTogglePivot={handleTogglePivot}
+                  onReorderFields={setSelectedFields}
                 />
 
                 <FilterBuilder

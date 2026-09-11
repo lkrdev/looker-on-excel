@@ -32,7 +32,8 @@ export function getStoredAuth(): AuthTokens | null {
     const raw = localStorage.getItem(STORAGE_KEY) || sessionStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
     const data = JSON.parse(raw);
-    if (data.expiresAt && Date.now() > data.expiresAt) {
+    // If expired and has no refresh token, clear and return null
+    if (data.expiresAt && Date.now() > data.expiresAt && !data.refreshToken) {
       clearAuth();
       return null;
     }
@@ -45,7 +46,7 @@ export function getStoredAuth(): AuthTokens | null {
 export function saveAuth(tokens: AuthTokens, persist: boolean = true) {
   const payload = JSON.stringify({
     ...tokens,
-    expiresAt: tokens.expiresIn ? Date.now() + tokens.expiresIn * 1000 : undefined,
+    expiresAt: tokens.expiresIn ? Date.now() + tokens.expiresIn * 1000 : tokens.expiresAt,
   });
   if (persist) {
     localStorage.setItem(STORAGE_KEY, payload);
@@ -57,6 +58,63 @@ export function saveAuth(tokens: AuthTokens, persist: boolean = true) {
 export function clearAuth() {
   localStorage.removeItem(STORAGE_KEY);
   sessionStorage.removeItem(STORAGE_KEY);
+}
+
+/**
+ * Silently refreshes Looker OAuth access token using refresh_token grant.
+ */
+export async function refreshAccessToken(tokens: AuthTokens): Promise<AuthTokens> {
+  if (!tokens.refreshToken) {
+    throw new Error("No refresh token available. Please sign in again.");
+  }
+
+  const tokenUrl = `${tokens.baseUrl.replace(/\/$/, "")}/api/token`;
+  const res = await fetch(tokenUrl, {
+    method: "POST",
+    mode: "cors",
+    headers: {
+      "Content-Type": "application/json;charset=UTF-8",
+      "x-looker-appid": "Looker Microsoft Excel Add-in",
+    },
+    body: JSON.stringify({
+      grant_type: "refresh_token",
+      client_id: tokens.clientId,
+      refresh_token: tokens.refreshToken,
+    }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    clearAuth();
+    throw new Error(`Session refresh failed (${res.status}): ${text}`);
+  }
+
+  const data = await res.json();
+  const updatedTokens: AuthTokens = {
+    ...tokens,
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token || tokens.refreshToken,
+    expiresIn: data.expires_in,
+    expiresAt: data.expires_in ? Date.now() + data.expires_in * 1000 : undefined,
+  };
+
+  saveAuth(updatedTokens);
+  return updatedTokens;
+}
+
+/**
+ * Checks token expiration with 5-minute buffer and silently refreshes if needed.
+ */
+export async function ensureValidToken(tokens: AuthTokens): Promise<AuthTokens> {
+  const BUFFER_MS = 5 * 60 * 1000;
+  if (tokens.expiresAt && Date.now() > tokens.expiresAt - BUFFER_MS && tokens.refreshToken) {
+    try {
+      return await refreshAccessToken(tokens);
+    } catch (err) {
+      console.warn("Silent token refresh failed, proceeding with current token:", err);
+    }
+  }
+  return tokens;
 }
 
 export function openOAuthDialog(authUrl: string): Promise<string> {

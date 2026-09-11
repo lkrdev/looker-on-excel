@@ -8,6 +8,7 @@ import {
   RadioGroup,
   Radio,
   Caption1,
+  Input,
   Accordion,
   AccordionItem,
   AccordionHeader,
@@ -50,6 +51,9 @@ export const TableSettings: React.FC<TableSettingsProps> = ({
   onOptionsChange,
 }) => {
   const styles = useStyles();
+  const PRESET_LIMITS = ["500", "2000", "10000", "25000", "50000", "70000", "-1"];
+  const isCustom = !PRESET_LIMITS.includes(rowLimit);
+  const [showCustomInput, setShowCustomInput] = React.useState(isCustom);
 
   return (
     <div className={styles.container}>
@@ -67,8 +71,18 @@ export const TableSettings: React.FC<TableSettingsProps> = ({
                 </Label>
                 <Select
                   size="small"
-                  value={rowLimit}
-                  onChange={(_, data) => onRowLimitChange(data.value)}
+                  value={isCustom || showCustomInput ? "custom" : rowLimit}
+                  onChange={(_, data) => {
+                    if (data.value === "custom") {
+                      setShowCustomInput(true);
+                      if (!isCustom) {
+                        onRowLimitChange("1000");
+                      }
+                    } else {
+                      setShowCustomInput(false);
+                      onRowLimitChange(data.value);
+                    }
+                  }}
                 >
                   <option value="500">500 rows</option>
                   <option value="2000">2,000 rows</option>
@@ -77,7 +91,20 @@ export const TableSettings: React.FC<TableSettingsProps> = ({
                   <option value="50000">50,000 rows</option>
                   <option value="70000">70,000 rows (High-Volume)</option>
                   <option value="-1">All / Max Results (-1)</option>
+                  <option value="custom">Custom...</option>
                 </Select>
+                {(isCustom || showCustomInput) && (
+                  <Input
+                    size="small"
+                    type="number"
+                    min={1}
+                    max={100000}
+                    placeholder="Enter custom row limit (e.g. 1500)"
+                    value={rowLimit === "-1" ? "" : rowLimit}
+                    onChange={(_, data) => onRowLimitChange(data.value)}
+                    style={{ marginTop: "4px" }}
+                  />
+                )}
               </div>
 
               {/* Destination */}
@@ -92,6 +119,20 @@ export const TableSettings: React.FC<TableSettingsProps> = ({
                   <Radio value="active" label="Insert into Active Worksheet (A1)" />
                   <Radio value="new" label="Create New Worksheet" />
                 </RadioGroup>
+                {destination === "new" && (
+                  <div style={{ marginLeft: "28px", marginTop: "4px", display: "flex", flexDirection: "column", gap: "2px" }}>
+                    <Label size="small">Worksheet Name</Label>
+                    <Input
+                      size="small"
+                      placeholder="e.g. Q3 Orders Analysis"
+                      value={options.sheetName || ""}
+                      onChange={(_, data) => onOptionsChange({ sheetName: data.value })}
+                    />
+                    <Caption1 style={{ color: tokens.colorNeutralForeground3 }}>
+                      Leave blank to default to Explore name.
+                    </Caption1>
+                  </div>
+                )}
               </div>
 
               {/* Table Style */}

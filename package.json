@@ -8,7 +8,7 @@
     "start": "webpack serve --mode development",
     "dev": "webpack serve --mode development",
     "typecheck": "tsc --noEmit",
-    "test": "npx tsx tests/formatMapper.test.ts && npx tsx tests/filterCompiler.test.ts"
+    "test": "npx tsx tests/formatMapper.test.ts && npx tsx tests/filterCompiler.test.ts && npx tsx tests/promptsAndFilters.test.ts && npx tsx tests/pivotsAndSorts.test.ts && npx tsx tests/synonymsAndSearch.test.ts"
   },
   "dependencies": {
     "@fluentui/react-components": "^9.54.0",

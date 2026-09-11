@@ -23,6 +23,7 @@ export interface FieldDefinition {
   field_group_variant?: string | null;
   dimension_group?: string | null;
   group_label?: string | null;
+  synonyms?: string[];
 }
 
 export interface ParameterDefinition {
@@ -89,7 +90,7 @@ export async function getExplore(
   explore: string
 ): Promise<ExploreDetail> {
   const fields =
-    "id,name,label,always_filter,conditionally_filter,fields(dimensions(name,label,label_short,type,value_format,value_format_name,view_label,description,field_group_label,field_group_variant,dimension_group),measures(name,label,label_short,type,value_format,value_format_name,view_label,description,field_group_label,field_group_variant),parameters(name,label,type,default_value))";
+    "id,name,label,always_filter,conditionally_filter,fields(dimensions(name,label,label_short,type,value_format,value_format_name,view_label,description,field_group_label,field_group_variant,dimension_group,synonyms),measures(name,label,label_short,type,value_format,value_format_name,view_label,description,field_group_label,field_group_variant,synonyms),parameters(name,label,type,default_value,synonyms))";
   const url = `${baseUrl.replace(/\/$/, "")}/api/4.0/lookml_models/${encodeURIComponent(model)}/explores/${encodeURIComponent(explore)}?fields=${encodeURIComponent(fields)}`;
 
   const res = await fetch(url, {

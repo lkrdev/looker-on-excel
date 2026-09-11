@@ -23,6 +23,7 @@ import {
   ChevronRight16Regular,
   ChevronDown16Regular,
   Folder16Regular,
+  ReorderRegular,
 } from "@fluentui/react-icons";
 import { FieldDefinition } from "../services/lookerClient";
 
@@ -110,6 +111,11 @@ interface FieldPickerProps {
   selectedFields: string[];
   onToggleField: (fieldName: string) => void;
   onClearSelected: () => void;
+  sorts?: string[];
+  onToggleSort?: (fieldName: string) => void;
+  pivots?: string[];
+  onTogglePivot?: (fieldName: string) => void;
+  onReorderFields?: (newFields: string[]) => void;
 }
 
 interface SubgroupStructure {
@@ -135,16 +141,59 @@ function resolveGroupLabel(f: FieldDefinition): string | null {
   return null;
 }
 
+/**
+ * Checks if a field matches the search query across name, label, short label,
+ * view label, field group, and synonyms.
+ */
+export function matchesFieldSearch(f: FieldDefinition, searchTerm: string): boolean {
+  if (!searchTerm.trim()) return true;
+  const term = searchTerm.toLowerCase();
+  return (
+    f.name.toLowerCase().includes(term) ||
+    (f.label ? f.label.toLowerCase().includes(term) : false) ||
+    (f.label_short ? f.label_short.toLowerCase().includes(term) : false) ||
+    (f.view_label ? f.view_label.toLowerCase().includes(term) : false) ||
+    (f.field_group_label ? f.field_group_label.toLowerCase().includes(term) : false) ||
+    (f.field_group_variant ? f.field_group_variant.toLowerCase().includes(term) : false) ||
+    (f.synonyms ? f.synonyms.some((s) => s.toLowerCase().includes(term)) : false)
+  );
+}
+
+/**
+ * Returns the specific synonym that matched if the field matched ONLY via synonym.
+ */
+export function getMatchedSynonym(f: FieldDefinition, searchTerm: string): string | null {
+  if (!searchTerm.trim()) return null;
+  const term = searchTerm.toLowerCase();
+  const directMatch =
+    f.name.toLowerCase().includes(term) ||
+    (f.label ? f.label.toLowerCase().includes(term) : false) ||
+    (f.label_short ? f.label_short.toLowerCase().includes(term) : false) ||
+    (f.view_label ? f.view_label.toLowerCase().includes(term) : false) ||
+    (f.field_group_label ? f.field_group_label.toLowerCase().includes(term) : false) ||
+    (f.field_group_variant ? f.field_group_variant.toLowerCase().includes(term) : false);
+
+  if (directMatch) return null;
+  return f.synonyms?.find((s) => s.toLowerCase().includes(term)) || null;
+}
+
 export const FieldPicker: React.FC<FieldPickerProps> = ({
   dimensions,
   measures,
   selectedFields,
   onToggleField,
   onClearSelected,
+  sorts = [],
+  onToggleSort,
+  pivots = [],
+  onTogglePivot,
+  onReorderFields,
 }) => {
   const styles = useStyles();
   const [searchTerm, setSearchTerm] = useState("");
   const [openSubgroups, setOpenSubgroups] = useState<Record<string, boolean>>({});
+  const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
 
   const toggleSubgroup = (key: string) => {
     setOpenSubgroups((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -155,19 +204,10 @@ export const FieldPicker: React.FC<FieldPickerProps> = ({
     [dimensions, measures]
   );
 
-  // Filter fields based on search
+  // Filter fields based on search (including LookML synonyms)
   const filteredFields = useMemo(() => {
     if (!searchTerm.trim()) return allFields;
-    const term = searchTerm.toLowerCase();
-    return allFields.filter(
-      (f) =>
-        f.name.toLowerCase().includes(term) ||
-        (f.label && f.label.toLowerCase().includes(term)) ||
-        (f.label_short && f.label_short.toLowerCase().includes(term)) ||
-        (f.view_label && f.view_label.toLowerCase().includes(term)) ||
-        (f.field_group_label && f.field_group_label.toLowerCase().includes(term)) ||
-        (f.field_group_variant && f.field_group_variant.toLowerCase().includes(term))
-    );
+    return allFields.filter((f) => matchesFieldSearch(f, searchTerm));
   }, [allFields, searchTerm]);
 
   // Group by view_label, then sub-group by field_group_label / dimension_group
@@ -221,6 +261,7 @@ export const FieldPicker: React.FC<FieldPickerProps> = ({
     const displayName = isNested && f.field_group_variant
       ? f.field_group_variant
       : f.label_short || f.label || f.name;
+    const matchedSynonym = getMatchedSynonym(f, searchTerm);
 
     return (
       <div key={f.name} className={styles.fieldRow}>
@@ -228,7 +269,16 @@ export const FieldPicker: React.FC<FieldPickerProps> = ({
           <Checkbox
             checked={isSelected}
             onChange={() => onToggleField(f.name)}
-            label={<Body2 style={{ fontSize: "12px" }}>{displayName}</Body2>}
+            label={
+              <div style={{ display: "flex", flexDirection: "column", gap: "1px" }}>
+                <Body2 style={{ fontSize: "12px" }}>{displayName}</Body2>
+                {matchedSynonym && (
+                  <Caption1 style={{ fontSize: "10px", color: tokens.colorBrandForeground1 }}>
+                    synonym: &quot;{matchedSynonym}&quot;
+                  </Caption1>
+                )}
+              </div>
+            }
           />
 
           {/* Field Description Info Click Popover */}
@@ -249,6 +299,33 @@ export const FieldPicker: React.FC<FieldPickerProps> = ({
                 <Caption1 style={{ color: tokens.colorNeutralForeground2, lineHeight: "16px" }}>
                   {f.description || "No description provided in LookML."}
                 </Caption1>
+                {f.synonyms && f.synonyms.length > 0 && (
+                  <div
+                    style={{
+                      marginTop: "4px",
+                      paddingTop: "4px",
+                      borderTop: `1px solid ${tokens.colorNeutralStroke2}`,
+                    }}
+                  >
+                    <Caption1
+                      style={{
+                        fontWeight: 600,
+                        color: tokens.colorNeutralForeground3,
+                        display: "block",
+                        marginBottom: "2px",
+                      }}
+                    >
+                      Synonyms:
+                    </Caption1>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: "4px" }}>
+                      {f.synonyms.map((s, idx) => (
+                        <Badge key={idx} size="small" appearance="tint" color="informative">
+                          {s}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 <div
                   style={{
                     marginTop: "6px",
@@ -312,13 +389,113 @@ export const FieldPicker: React.FC<FieldPickerProps> = ({
             </Button>
           </div>
           <div className={styles.selectedBar}>
-            {selectedFields.map((fieldKey) => {
+            {selectedFields.map((fieldKey, idx) => {
               const def = allFields.find((f) => f.name === fieldKey);
+              const isDimension = def?.category === "dimension";
+              const isPivoted = pivots.includes(fieldKey);
+              const sortEntry = sorts.find((s) => s === fieldKey || s.startsWith(`${fieldKey} `));
+              const isAsc = sortEntry === fieldKey || sortEntry === `${fieldKey} asc`;
+              const isDesc = sortEntry === `${fieldKey} desc`;
+              const isDragging = draggedIndex === idx;
+              const isDropTarget = dragOverIndex === idx;
+
               return (
-                <div key={fieldKey} className={styles.selectedChip}>
-                  <span>{def?.label || fieldKey}</span>
+                <div
+                  key={fieldKey}
+                  className={styles.selectedChip}
+                  draggable={!!onReorderFields}
+                  onDragStart={(e) => {
+                    setDraggedIndex(idx);
+                    e.dataTransfer.effectAllowed = "move";
+                    e.dataTransfer.setData("text/plain", String(idx));
+                  }}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = "move";
+                  }}
+                  onDragEnter={() => setDragOverIndex(idx)}
+                  onDragEnd={() => {
+                    setDraggedIndex(null);
+                    setDragOverIndex(null);
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    if (draggedIndex !== null && draggedIndex !== idx && onReorderFields) {
+                      const next = [...selectedFields];
+                      const [moved] = next.splice(draggedIndex, 1);
+                      next.splice(idx, 0, moved);
+                      onReorderFields(next);
+                    }
+                    setDraggedIndex(null);
+                    setDragOverIndex(null);
+                  }}
+                  style={{
+                    cursor: onReorderFields ? "grab" : "default",
+                    opacity: isDragging ? 0.4 : 1,
+                    border: isDropTarget ? `1px dashed ${tokens.colorBrandStroke1}` : undefined,
+                    backgroundColor: isDropTarget ? tokens.colorBrandBackground2 : undefined,
+                    transition: "border 0.15s ease, background-color 0.15s ease",
+                  }}
+                  title={onReorderFields ? "Drag to reorder column order" : undefined}
+                >
+                  {onReorderFields && (
+                    <ReorderRegular
+                      style={{
+                        fontSize: "12px",
+                        color: tokens.colorNeutralForeground4,
+                        cursor: "grab",
+                        marginRight: "2px",
+                      }}
+                    />
+                  )}
+                  <span style={{ fontWeight: 500 }}>{def?.label || fieldKey}</span>
+
+                  {/* Pivot Toggle for Dimensions */}
+                  {isDimension && onTogglePivot && (
+                    <span
+                      title={isPivoted ? "Remove pivot (Row)" : "Pivot across columns (Column)"}
+                      style={{
+                        cursor: "pointer",
+                        fontSize: "10px",
+                        fontWeight: 600,
+                        padding: "1px 5px",
+                        borderRadius: "8px",
+                        backgroundColor: isPivoted ? tokens.colorBrandBackground : tokens.colorNeutralBackground3,
+                        color: isPivoted ? tokens.colorNeutralForegroundOnBrand : tokens.colorNeutralForeground2,
+                      }}
+                      onClick={() => onTogglePivot(fieldKey)}
+                    >
+                      {isPivoted ? "PIVOT" : "+Pivot"}
+                    </span>
+                  )}
+
+                  {/* Sort Direction Toggle */}
+                  {onToggleSort && (
+                    <span
+                      title={
+                        isAsc
+                          ? "Sorted Ascending. Click to sort Descending."
+                          : isDesc
+                          ? "Sorted Descending. Click to remove sort."
+                          : "Click to sort Ascending."
+                      }
+                      style={{
+                        cursor: "pointer",
+                        fontSize: "11px",
+                        fontWeight: 700,
+                        padding: "1px 4px",
+                        borderRadius: "4px",
+                        color: isAsc || isDesc ? tokens.colorBrandForeground1 : tokens.colorNeutralForeground4,
+                        backgroundColor: isAsc || isDesc ? tokens.colorBrandBackground2 : "transparent",
+                      }}
+                      onClick={() => onToggleSort(fieldKey)}
+                    >
+                      {isAsc ? "↑" : isDesc ? "↓" : "↕"}
+                    </span>
+                  )}
+
                   <DismissRegular
-                    style={{ cursor: "pointer", fontSize: "12px" }}
+                    style={{ cursor: "pointer", fontSize: "12px", marginLeft: "2px" }}
                     onClick={() => onToggleField(fieldKey)}
                   />
                 </div>

@@ -1,6 +1,12 @@
 # Looker Microsoft Excel Add-in
 
-Enterprise Microsoft Excel Taskpane Add-in (Office.js) connecting Excel workbooks directly to Looker's semantic modeling layer. It enables business users, financial analysts, and data teams to authenticate via Looker OAuth 2.0 PKCE, explore models and views, select dimensions and measures, apply filters and sort orders, and stream high-volume datasets into native Excel Tables (`ListObject`) and PivotTables with one-click refresh and formatting persistence.
+Enterprise Microsoft Excel Taskpane Add-in (Office.js) connecting Excel workbooks directly to Looker's semantic modeling layer. It enables business users, financial analysts, and data teams to authenticate via Looker OAuth 2.0 PKCE, explore models and views, select dimensions and measures, configure pivots and sort orders, apply typed filters, and stream high-volume datasets into native Excel Tables (`ListObject`) and PivotTables with one-click refresh, formatting preservation, and residual data protection.
+
+---
+
+## Walkthrough & Demo
+
+![Looker Microsoft Excel Add-in Walkthrough](docs/images/looker-excel-demo.gif)
 
 ---
 
@@ -34,25 +40,48 @@ flowchart TD
 
 ---
 
-## Key Features
+## Key Capabilities
 
-### Looker CORS OAuth 2.0 with PKCE
+### Looker CORS OAuth 2.0 with PKCE & Silent Refresh
 - Native browser-based OAuth 2.0 authentication utilizing Proof Key for Code Exchange (PKCE, RFC 7636).
 - Adheres to Looker's CORS API specification (`scope=cors_api`, 32-byte cryptographic state verification, direct token exchange at `POST /api/token`).
 - Operates securely across macOS WebKit, Windows WebView2, and Excel on the Web using the Office Dialog API to avoid third-party cookie restrictions and iframe blocking.
+- Implements proactive and silent token validation (`ensureValidToken`) to refresh expired sessions before launching long-running queries.
+
+### LookML Synonyms & Intelligent Search
+- The field catalog indexes LookML `synonyms` parameters alongside field names, labels, short labels, view labels, and field groups.
+- Searching for natural business terms (e.g. searching for `"revenue"` when the LookML field is `Sale Price`) surfaces matching fields instantly.
+- Displays a contextual `synonym: "<term>"` badge on search hits matching via synonym, clarifying why the field matched.
+- Field inspection popovers display full LookML synonym lists alongside data types and technical field references.
+
+### Pivots & Crosstab Grid Expansion
+- One-click pivot toggle on selected dimension chips.
+- Converts Looker nested crosstab responses into flattened Excel column matrices with hierarchical headers.
+- Preserves measure-specific formatting masks (currency, percentages, timestamps) across dynamically generated pivot columns.
+
+### Multi-Field Sorting
+- Independent ASC and DESC sort toggling across selected dimension and measure chips.
+- Visual sort indicators with automatic multi-field precedence tracking.
+
+### Required Prompts & Typed Filters
+- Detects required LookML parameters and `always_filter` declarations, displaying an interactive prompt dialog prior to query execution.
+- Specialized filter operators tailored to data types:
+  - String filters: Live suggestion autocompletion via Looker's suggestions API.
+  - Date filters: Relative timeframes (`is_in_the_last`, `is_this`, `is_previous`), date ranges (`is_in_range`), exact day matching, and before/after boundaries.
+  - Numeric filters: Comparison operators (`=`, `!=`, `>`, `>=`, `<`, `<=`, `between`, `is_null`, `is_not_null`).
 
 ### High-Volume Asynchronous Streaming
 - Multi-step Looker query execution using `POST /api/4.0/queries` followed by `POST /api/4.0/query_tasks` with `result_format: "json"`.
 - Asynchronous polling with live elapsed time, row count counters, and query cancellation via `DELETE /api/4.0/running_queries/{id}`.
 - Flat key-value format keeps client memory consumption under 45 MB even on high-row queries (70,000+ rows).
 
-### Adaptive Batch Cell Budgeting
+### Adaptive Batch Cell Budgeting & Calculation Suspension
 - Dynamically calculates row chunk sizes based on column count (`batchSize = max(500, floor(35,000 / colCount))`) to guarantee write payloads remain well below the 4 MB Office.js transaction limit.
-- Suspends screen updating and calculation engine during batch writes to eliminate grid stutter and interface freezing.
+- Suspends Excel screen updating and calculation engines during batch writes to eliminate UI stutter and freezing.
 
-### LookML-to-Excel Number Formatting Engine
-- Implements a dual-channel data contract: raw numerical and date values are written to cell values, while LookML format strings (`value_format` or `value_format_name`) are resolved to native Excel `numberFormat` masks (e.g. `$#,##0.00`, `0.00%`, `yyyy-mm-dd`).
-- Excel formula cells referencing imported data compute correctly without requiring manual string stripping or type casting.
+### Residual Data Cleaning & Table Overwrite Protection
+- Before writing refreshed data, existing Excel Tables (`ListObject`) are safely converted to ranges to prevent `"A table can't overlap another table"` runtime exceptions.
+- Calculates differential bounding boxes (`computeResidualRanges`) when a refreshed query returns fewer rows or fewer columns than previously loaded, clearing stale/ghost cells while protecting adjacent user formulas.
 
 ### Formula Auto-Expansion & Formatting Preservation
 - Detects custom Excel formulas placed in adjacent columns and automatically fills them down as data expands during refresh.
@@ -107,7 +136,7 @@ curl -X POST "https://<your-instance>.cloud.looker.com/api/4.0/oauth_client_apps
   }'
 ```
 
-For production deployments, set `redirect_uri` to your hosted domain (e.g. `https://excel.yourcompany.com/dialog-callback.html`).
+For production deployments, set `redirect_uri` to your hosted domain (e.g. `https://<your-domain>/dialog-callback.html`).
 
 ### CORS Domain Allowlist
 
@@ -187,11 +216,13 @@ The dev server starts on `https://localhost:3000`. You can verify by opening `ht
 2. Build Query:
    - Select a Model from the dropdown catalog.
    - Select an Explore view.
-   - Pick required Dimensions and Measures.
-   - Add filters, sort orders, and set row limits.
+   - Pick Dimensions and Measures using search (supports LookML names, labels, and synonyms).
+   - Toggle Pivots or multi-field Sorts directly on selected field chips.
+   - Configure typed Filters or provide required Parameters when prompted.
 3. Configure Table Options:
-   - Enable Native Excel Table (`ListObject`) styling.
-   - Set number format preferences and formula auto-expansion.
+   - Select row limit (presets from 500 to 70,000, or enter a Custom limit).
+   - Choose destination (Active Worksheet or Create New Worksheet with custom title).
+   - Enable Native Excel Table (`ListObject`) styling and header freezing.
 4. Import Data:
    - Click Import Data into Excel. The progress bar displays real-time execution status and row chunk streaming.
 5. Refresh:
@@ -210,12 +241,12 @@ The dev server starts on `https://localhost:3000`. You can verify by opening `ht
 │   │   ├── dialog-callback.html
 │   │   └── dialog-callback.ts
 │   └── taskpane/            # React taskpane UI and services
-│       ├── components/      # UI components (Header, Builder, RefreshView, etc.)
+│       ├── components/      # UI components (FieldPicker, TableSettings, FilterBuilder, etc.)
 │       ├── services/        # Looker client, query runner, Excel writer, metadata
 │       ├── theme/           # Looker design token ramp for Fluent UI v9
 │       ├── index.html       # Taskpane HTML shell
 │       └── index.tsx        # React entrypoint
-├── tests/                   # Performance and format translation tests
+├── tests/                   # Unit test suites (formats, filters, pivots, synonyms)
 ├── manifest.xml             # Office Add-in manifest definition
 ├── tsconfig.json            # TypeScript configuration
 ├── webpack.config.js        # Webpack build and dev server configuration
@@ -231,10 +262,9 @@ Verify TypeScript compilation:
 npm run typecheck
 ```
 
-Execute unit and performance tests:
+Execute unit test suites (number formatting, filter compiler, prompts, pivots & sorts, synonyms):
 ```bash
-npx ts-node tests/chunkBudget.test.ts
-npx ts-node tests/formatMapper.test.ts
+npm test
 ```
 
 Compile production distribution:
