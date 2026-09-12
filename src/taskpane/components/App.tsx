@@ -88,7 +88,7 @@ export const App: React.FC = () => {
   const [pivots, setPivots] = useState<string[]>([]);
   const [filters, setFilters] = useState<FilterCondition[]>([]);
   const [promptValues, setPromptValues] = useState<Record<string, string>>({});
-  const [rowLimit, setRowLimit] = useState<string>("5000");
+  const [rowLimit, setRowLimit] = useState<string>("500");
   const [destination, setDestination] = useState<"active" | "new">("active");
   const [tableOptions, setTableOptions] = useState<WriteOptions>({
     useExcelTable: true,
@@ -107,6 +107,19 @@ export const App: React.FC = () => {
   const [refreshingAll, setRefreshingAll] = useState(false);
 
   const activeTaskRef = useRef<QueryTaskController | null>(null);
+
+  // Validate / refresh token on taskpane mount / relaunch of Excel
+  useEffect(() => {
+    if (auth && auth.refreshToken) {
+      ensureValidToken(auth)
+        .then((valid) => {
+          if (valid.accessToken !== auth.accessToken) {
+            setAuth(valid);
+          }
+        })
+        .catch((e) => console.warn("Token refresh on relaunch failed:", e));
+    }
+  }, []);
 
   // Check active sheet metadata
   const checkSheetMetadata = useCallback(async () => {

@@ -51,7 +51,7 @@ export const TableSettings: React.FC<TableSettingsProps> = ({
   onOptionsChange,
 }) => {
   const styles = useStyles();
-  const PRESET_LIMITS = ["500", "2000", "10000", "25000", "50000", "70000", "-1"];
+  const PRESET_LIMITS = ["500", "2000", "10000", "25000", "50000", "100000", "-1"];
   const isCustom = !PRESET_LIMITS.includes(rowLimit);
   const [showCustomInput, setShowCustomInput] = React.useState(isCustom);
 
@@ -89,7 +89,7 @@ export const TableSettings: React.FC<TableSettingsProps> = ({
                   <option value="10000">10,000 rows</option>
                   <option value="25000">25,000 rows</option>
                   <option value="50000">50,000 rows</option>
-                  <option value="70000">70,000 rows (High-Volume)</option>
+                  <option value="100000">100,000 rows (High-Volume)</option>
                   <option value="-1">All / Max Results (-1)</option>
                   <option value="custom">Custom...</option>
                 </Select>

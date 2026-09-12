@@ -207,13 +207,22 @@ export async function writeLookerDataToWorksheet(
 
     // 2. Inspect adjacent column for user formulas (SAC Formula Auto-Expansion)
     let hasAdjacentFormula = false;
+    let savedAdjacentFormula: string | null = null;
+    let savedAdjacentHeader: string | null = null;
+
     if (options.autoExpandFormulas) {
       try {
         const adjacentCell = sheet.getRangeByIndexes(1, colCount, 1, 1);
+        const adjacentHeaderCell = sheet.getRangeByIndexes(0, colCount, 1, 1);
         adjacentCell.load(["formulas"]);
+        adjacentHeaderCell.load(["values"]);
         await context.sync();
         const formulaVal = adjacentCell.formulas?.[0]?.[0];
-        hasAdjacentFormula = typeof formulaVal === "string" && formulaVal.startsWith("=");
+        if (typeof formulaVal === "string" && formulaVal.startsWith("=")) {
+          hasAdjacentFormula = true;
+          savedAdjacentFormula = formulaVal;
+          savedAdjacentHeader = (adjacentHeaderCell.values?.[0]?.[0] as string) || "Calculation";
+        }
       } catch {
         hasAdjacentFormula = false;
       }
@@ -247,13 +256,15 @@ export async function writeLookerDataToWorksheet(
       console.warn("Could not inspect existing tables:", err);
     }
 
-    // If writing to existing active worksheet, clear any residual rows or columns from previous larger runs
+    // If writing to existing active worksheet, clear any residual rows or columns from previous larger runs.
+    // If the user added an adjacent calculation column, exclude it from residual column wiping.
     if (options.destination !== "new" && (prevTableRows > 0 || prevTableCols > 0)) {
+      const residualColsToProtect = hasAdjacentFormula ? 1 : 0;
       const { extraColRange, extraRowRange } = computeResidualRanges(
         prevTableRows,
         prevTableCols,
         totalRows + 1,
-        colCount
+        colCount + residualColsToProtect
       );
 
       if (extraColRange) {
@@ -339,11 +350,18 @@ export async function writeLookerDataToWorksheet(
     sampleRange.format.autofitColumns();
 
     // 7. Auto-fill adjacent formula down if detected
-    if (options.autoExpandFormulas && hasAdjacentFormula && totalRows > 1) {
+    if (options.autoExpandFormulas && hasAdjacentFormula && savedAdjacentFormula && totalRows >= 1) {
       try {
+        if (savedAdjacentHeader) {
+          const headerCell = sheet.getRangeByIndexes(0, colCount, 1, 1);
+          headerCell.values = [[savedAdjacentHeader]];
+        }
         const formulaOrigin = sheet.getRangeByIndexes(1, colCount, 1, 1);
-        const formulaTarget = sheet.getRangeByIndexes(1, colCount, totalRows, 1);
-        formulaOrigin.autoFill(formulaTarget, Excel.AutoFillType.fillCopy);
+        formulaOrigin.formulas = [[savedAdjacentFormula]];
+        if (totalRows > 1) {
+          const formulaTarget = sheet.getRangeByIndexes(1, colCount, totalRows, 1);
+          formulaOrigin.autoFill(formulaTarget, Excel.AutoFillType.fillCopy);
+        }
       } catch (e) {
         console.warn("Could not auto-fill adjacent formula:", e);
       }
