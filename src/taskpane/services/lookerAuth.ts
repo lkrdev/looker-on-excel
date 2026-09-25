@@ -117,7 +117,7 @@ export async function ensureValidToken(tokens: AuthTokens): Promise<AuthTokens> 
   return tokens;
 }
 
-export function openOAuthDialog(authUrl: string): Promise<string> {
+export function openOAuthDialog(authUrl: string, expectedState?: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const dialogUrl = `${window.location.origin}/dialog-auth.html?authUrl=${encodeURIComponent(authUrl)}`;
 
@@ -136,6 +136,8 @@ export function openOAuthDialog(authUrl: string): Promise<string> {
             const data = typeof arg.message === "string" ? JSON.parse(arg.message) : arg;
             if (data.error) {
               reject(new Error(data.errorDescription || data.error));
+            } else if (expectedState && data.state !== expectedState) {
+              reject(new Error("OAuth state mismatch. Please try signing in again."));
             } else if (data.code) {
               resolve(data.code);
             } else {

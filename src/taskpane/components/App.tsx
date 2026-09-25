@@ -37,11 +37,12 @@ import { resolveExcelNumberFormat } from "../services/formatMapper";
 import { runQueryTask, QueryTaskController, QueryPayload } from "../services/queryTaskRunner";
 import {
   writeLookerDataToWorksheet,
+  expandPivotedColumns,
   ColumnDefinition,
   WriteOptions,
 } from "../services/excelWriter";
 import {
-  getActiveSheetMetadata,
+  getActiveSheetInfo,
   saveSheetMetadata,
   getAllWorkbookLookerSheets,
   StoredSheetConfig,
@@ -107,6 +108,8 @@ export const App: React.FC = () => {
   const [refreshingAll, setRefreshingAll] = useState(false);
 
   const activeTaskRef = useRef<QueryTaskController | null>(null);
+  const lastActiveSheetIdRef = useRef<string | null>(null);
+  const skipDefaultPromptsRef = useRef<boolean>(false);
 
   // Validate / refresh token on taskpane mount / relaunch of Excel
   useEffect(() => {
@@ -121,23 +124,24 @@ export const App: React.FC = () => {
     }
   }, []);
 
-  // Check active sheet metadata
-  const checkSheetMetadata = useCallback(async () => {
-    const meta = await getActiveSheetMetadata();
-    setSheetConfig(meta);
-    if (meta) {
-      setActiveView("refresh");
-    } else {
-      setActiveView("builder");
+  // Check active sheet metadata; only switch activeView when the worksheet tab actually changes
+  const checkSheetMetadata = useCallback(async (forceViewSync: boolean = false) => {
+    const { sheetId, config } = await getActiveSheetInfo();
+    const sheetChanged = sheetId !== null && sheetId !== lastActiveSheetIdRef.current;
+
+    if (forceViewSync || sheetChanged || lastActiveSheetIdRef.current === null) {
+      lastActiveSheetIdRef.current = sheetId;
+      setSheetConfig(config);
+      setActiveView(config ? "refresh" : "builder");
     }
   }, []);
 
   // Listen for worksheet switches
   useEffect(() => {
-    checkSheetMetadata();
+    checkSheetMetadata(true);
 
     const onSelectionChange = () => {
-      checkSheetMetadata();
+      checkSheetMetadata(false);
     };
 
     if (window.Office && Office.context && Office.context.document) {
@@ -169,13 +173,13 @@ export const App: React.FC = () => {
     getModels(auth.baseUrl, auth.accessToken)
       .then((data) => {
         setModels(data);
-        // Default to first model and explore if available
+        // Default to first model and explore if available and not already selected
         const defaultModel = data[0];
         if (defaultModel) {
-          setSelectedModel(defaultModel.name);
+          setSelectedModel((prev) => prev || defaultModel.name);
           const defaultExp = defaultModel.explores?.[0];
           if (defaultExp) {
-            setSelectedExplore(defaultExp.name);
+            setSelectedExplore((prev) => prev || defaultExp.name);
           }
         }
       })
@@ -194,8 +198,10 @@ export const App: React.FC = () => {
       .then((data) => {
         setExploreDetail(data);
 
-        // Pre-fill defaults for any required always_filter
-        if (data.always_filter && data.always_filter.length > 0) {
+        // Pre-fill defaults for any required always_filter unless hydrating from handleEditQuery
+        if (skipDefaultPromptsRef.current) {
+          skipDefaultPromptsRef.current = false;
+        } else if (data.always_filter && data.always_filter.length > 0) {
           const initialPrompts: Record<string, string> = {};
           data.always_filter.forEach((af) => {
             if (af.values && af.values.length > 0) {
@@ -274,6 +280,13 @@ export const App: React.FC = () => {
 
   // Hydrate query builder from stored sheet metadata (Edit Query workflow)
   const handleEditQuery = (config: StoredSheetConfig) => {
+    if (
+      config.queryPayload.model !== selectedModel ||
+      config.queryPayload.view !== selectedExplore
+    ) {
+      skipDefaultPromptsRef.current = true;
+    }
+
     setSelectedModel(config.queryPayload.model);
     setSelectedExplore(config.queryPayload.view);
     setSelectedFields(config.queryPayload.fields || []);
@@ -285,17 +298,28 @@ export const App: React.FC = () => {
       setDestination("active");
     }
 
-    if (config.queryPayload.filters) {
+    if (config.filters || config.promptValues) {
+      setPromptValues(config.promptValues || {});
+      setFilters(config.filters || []);
+    } else if (config.queryPayload.filters) {
       const restoredPrompts: Record<string, string> = {};
       const restoredFilters: FilterCondition[] = [];
+      const promptFieldNames = new Set<string>([
+        ...(exploreDetail?.always_filter?.map((af) => af.field) || []),
+        ...(exploreDetail?.fields.parameters?.map((p) => p.name) || []),
+      ]);
+
       Object.entries(config.queryPayload.filters).forEach(([field, expr], idx) => {
-        restoredPrompts[field] = expr;
-        restoredFilters.push({
-          id: `${Date.now()}_${idx}`,
-          field,
-          operator: "is",
-          value: expr,
-        });
+        if (promptFieldNames.has(field)) {
+          restoredPrompts[field] = expr;
+        } else {
+          restoredFilters.push({
+            id: `${Date.now()}_${idx}`,
+            field,
+            operator: "matches_advanced",
+            value: expr,
+          });
+        }
       });
       setPromptValues(restoredPrompts);
       setFilters(restoredFilters);
@@ -396,7 +420,9 @@ export const App: React.FC = () => {
           const def = allAvailableFields.find((fld) => fld.name === f.field);
           const expr = compileFilterToLookerExpression(f, def);
           if (expr !== null && expr !== undefined && expr !== "") {
-            compiledFilters[f.field] = expr;
+            compiledFilters[f.field] = compiledFilters[f.field]
+              ? `${compiledFilters[f.field]}, ${expr}`
+              : expr;
           }
         }
       });
@@ -423,7 +449,11 @@ export const App: React.FC = () => {
       });
 
       // 3. Launch Async Query Task
-      const controller = await runQueryTask(auth.baseUrl, auth.accessToken, queryPayload);
+      const controller = await runQueryTask(
+        validAuth.baseUrl,
+        validAuth.accessToken,
+        queryPayload
+      );
       activeTaskRef.current = controller;
 
       const dataRows = await controller.waitForResults((status, elapsed) => {
@@ -432,10 +462,22 @@ export const App: React.FC = () => {
 
       // 4. Stream to Excel
       setStatusText(`Streaming ${dataRows.length.toLocaleString()} rows into worksheet...`);
+      const expandedColCount = expandPivotedColumns(
+        columns,
+        dataRows,
+        pivots.length > 0 ? pivots : undefined
+      ).expandedColumns.length;
+
       const writeOptions: WriteOptions = {
         ...tableOptions,
         destination,
         sheetName: exploreDetail.label || selectedExplore || "Looker Data",
+        pivots: pivots.length > 0 ? pivots : undefined,
+        prevRowCount: destination === "active" ? sheetConfig?.rowCount : undefined,
+        prevColCount:
+          destination === "active"
+            ? sheetConfig?.options?.prevColCount ?? sheetConfig?.columns?.length
+            : undefined,
       };
       await writeLookerDataToWorksheet(columns, dataRows, writeOptions, (pct) => {
         setProgressPercent(pct);
@@ -445,15 +487,21 @@ export const App: React.FC = () => {
       const config: StoredSheetConfig = {
         queryPayload,
         columns,
-        options: writeOptions,
+        options: {
+          ...writeOptions,
+          destination: "active",
+          prevRowCount: dataRows.length,
+          prevColCount: expandedColCount,
+        },
         lastRefreshed: new Date().toISOString(),
         rowCount: dataRows.length,
         modelLabel: models.find((m) => m.name === selectedModel)?.label,
         exploreLabel: exploreDetail.label,
+        filters,
+        promptValues,
       };
       await saveSheetMetadata(config);
-      setSheetConfig(config);
-      setActiveView("refresh");
+      await checkSheetMetadata(true);
     } catch (err: any) {
       setErrorMessage(err.message || "Query execution failed.");
     } finally {
@@ -488,16 +536,35 @@ export const App: React.FC = () => {
         setStatusText(`Refreshing data from warehouse... (${elapsed}s)`);
       });
 
+      const activePivots = sheetConfig.queryPayload.pivots || undefined;
+      const expandedColCount = expandPivotedColumns(
+        sheetConfig.columns,
+        dataRows,
+        activePivots
+      ).expandedColumns.length;
+
       setStatusText(`Writing ${dataRows.length.toLocaleString()} rows...`);
       await writeLookerDataToWorksheet(
         sheetConfig.columns,
         dataRows,
-        { ...sheetConfig.options, destination: "active" },
+        {
+          ...sheetConfig.options,
+          destination: "active",
+          pivots: activePivots,
+          prevRowCount: sheetConfig.rowCount,
+          prevColCount: sheetConfig.options?.prevColCount ?? sheetConfig.columns.length,
+        },
         (pct) => setProgressPercent(pct)
       );
 
       const updatedConfig: StoredSheetConfig = {
         ...sheetConfig,
+        options: {
+          ...sheetConfig.options,
+          destination: "active",
+          prevRowCount: dataRows.length,
+          prevColCount: expandedColCount,
+        },
         lastRefreshed: new Date().toISOString(),
         rowCount: dataRows.length,
       };
@@ -515,19 +582,57 @@ export const App: React.FC = () => {
   const handleRefreshAll = async () => {
     if (!auth) return;
     setRefreshingAll(true);
+    setErrorMessage(null);
     try {
+      const validAuth = await ensureValidToken(auth);
+      if (validAuth.accessToken !== auth.accessToken) {
+        setAuth(validAuth);
+      }
+
       const sheets = await getAllWorkbookLookerSheets();
       for (const s of sheets) {
-        const controller = await runQueryTask(auth.baseUrl, auth.accessToken, s.config.queryPayload);
+        const controller = await runQueryTask(
+          validAuth.baseUrl,
+          validAuth.accessToken,
+          s.config.queryPayload
+        );
         const dataRows = await controller.waitForResults(() => {});
-        await writeLookerDataToWorksheet(s.config.columns, dataRows, s.config.options, () => {});
-        await saveSheetMetadata({
-          ...s.config,
-          lastRefreshed: new Date().toISOString(),
-          rowCount: dataRows.length,
-        });
+        const sPivots = s.config.queryPayload.pivots || undefined;
+        const expandedColCount = expandPivotedColumns(
+          s.config.columns,
+          dataRows,
+          sPivots
+        ).expandedColumns.length;
+
+        await writeLookerDataToWorksheet(
+          s.config.columns,
+          dataRows,
+          {
+            ...s.config.options,
+            destination: "active",
+            targetSheetId: s.sheetId,
+            pivots: sPivots,
+            prevRowCount: s.config.rowCount,
+            prevColCount: s.config.options?.prevColCount ?? s.config.columns.length,
+          },
+          () => {}
+        );
+        await saveSheetMetadata(
+          {
+            ...s.config,
+            options: {
+              ...s.config.options,
+              destination: "active",
+              prevRowCount: dataRows.length,
+              prevColCount: expandedColCount,
+            },
+            lastRefreshed: new Date().toISOString(),
+            rowCount: dataRows.length,
+          },
+          s.sheetId
+        );
       }
-      await checkSheetMetadata();
+      await checkSheetMetadata(true);
     } catch (e: any) {
       setErrorMessage(`Refresh All failed: ${e.message}`);
     } finally {
@@ -576,6 +681,7 @@ export const App: React.FC = () => {
         <RefreshView
           config={sheetConfig}
           onRefresh={handleRefreshActive}
+          onCancel={handleCancelQuery}
           onEdit={() => handleEditQuery(sheetConfig)}
           onNewQuery={handleStartNewQuery}
           isRefreshing={isExecuting}

@@ -129,7 +129,7 @@ export const AuthView: React.FC<AuthViewProps> = ({ onSuccess }) => {
         `&code_challenge_method=S256`;
 
       // Open Office Dialog
-      const code = await openOAuthDialog(authUrl);
+      const code = await openOAuthDialog(authUrl, state);
 
       // Exchange code for token
       const tokens = await exchangeCodeForToken(

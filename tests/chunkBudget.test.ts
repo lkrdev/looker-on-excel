@@ -1,6 +1,4 @@
-function calculateBatchSize(colCount: number, targetCellBudget: number = 35000): number {
-  return Math.max(500, Math.floor(targetCellBudget / colCount));
-}
+import { calculateBatchSize } from "../src/taskpane/services/excelWriter";
 
 function assertEqual(actual: any, expected: any, testName: string) {
   if (actual !== expected) {

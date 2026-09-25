@@ -190,3 +190,46 @@ LookML explores group fields by view label and dimension groups. In complex ente
 - **Single Sign-On (SSO) & IdP Federation**:
   - Leverage Looker SAML 2.0 / OpenID Connect (OIDC) integration with corporate identity providers (Google Workspace, Okta, Microsoft Entra ID).
   - The OAuth PKCE flow automatically routes through the corporate IdP, enforcing Multi-Factor Authentication (MFA) and conditional access policies.
+
+---
+
+## 9. Viewer Mode: Dashboards, Tile Selection & Looks Execution
+
+### Context & Need
+Looker API 4.0's ad-hoc model and explore discovery endpoints (`/api/4.0/lookml_models` and `/api/4.0/lookml_models/{model}/explores/{explore}`) require the **`explore`** permission, which classifies users under a **Standard User** license. Organizations with large populations of **Viewer**-licensed users (`access_data`, `see_looks`, `see_user_dashboards`, `see_lookml_dashboards`) need a native workflow in the Excel add-in that operates 100% within Viewer licensing boundaries over CORS.
+
+### Technical Architecture
+- **Content Discovery Endpoints (Viewer-Compatible)**:
+  - Browse accessible Dashboards and Looks via `GET /api/4.0/dashboards` (`see_user_dashboards` / `see_lookml_dashboards`) and `GET /api/4.0/looks` (`see_looks`).
+  - Fetch full dashboard metadata via `GET /api/4.0/dashboards/{dashboard_id}`, extracting `dashboard_elements` (tiles) and `dashboard_filters`.
+- **Execution Paths**:
+  - **Looks**: Execute directly via `GET /api/4.0/looks/{look_id}/run/json` or clone the Look's `query` object for customized execution.
+  - **Dashboard Elements**: Extract the underlying `query` (or `result_maker.query`) from the selected `dashboard_element`.
+- **Planning for Dashboard Filter Permutations**:
+  - Dashboard tiles rarely store static filters in isolation; instead, each `dashboard_element` defines a `result_maker.filterables[].listen` array mapping global `dashboard_filters` (`dashboard_filter_name`) to specific Explore fields (`field`).
+  - **Filter Resolution Engine**:
+    1. Render the parent Dashboard's global `dashboard_filters` in the taskpane (defaulting to each filter's `default_value`).
+    2. Allow the Viewer user to modify filter permutations (e.g., changing Date Range, Region, or Brand using `/api/4.0/models/{model}/views/{explore}/fields/{field}/suggestions`, which only requires `access_data`).
+    3. Merge the base `dashboard_element.query.filters` with the user's selected dashboard filter values mapped through the tile's `listen` definitions.
+    4. Submit the merged query payload to `POST /api/4.0/queries` and `POST /api/4.0/query_tasks` (which only requires `access_data`), streaming the filtered tile results into Excel.
+
+---
+
+## 10. Metadata Proxy Service for Ad-Hoc Viewer Exploration
+
+### Context & Need
+To enable full ad-hoc Explore field-picking (Dimensions, Measures, Pivots, Filters) for **Viewer**-licensed users without upgrading their Looker seats to Standard User licenses, the add-in needs a mechanism to retrieve LookML model and Explore schemas without calling `/api/4.0/lookml_models` under the Viewer user's token.
+
+### Technical Architecture
+- **Split-Plane Authentication & Execution Model**:
+  1. **Control Plane (Schema Discovery via Lightweight Proxy)**:
+     - Deploy a stateless serverless proxy (e.g., Cloud Run or Cloud Functions) configured with a single Looker **Service Account** (API3 Client ID/Secret assigned a role with `explore` + `access_data` permissions).
+     - The proxy exposes two read-only cached endpoints (`GET /proxy/models` and `GET /proxy/models/{model}/explores/{explore}`) that fetch and cache pruned LookML schemas from Looker.
+     - Optional: Verify the caller's Looker Bearer token against `GET /api/4.0/user` on the proxy and filter the returned model list based on the user's accessible models.
+  2. **Data Plane (Direct Client-to-Looker Query Execution via CORS)**:
+     - Once the Excel add-in hydrates the Field Picker UI from the Metadata Proxy, **all data queries and filter value suggestions bypass the proxy entirely**.
+     - The add-in calls Looker directly over CORS (`POST /api/4.0/queries`, `POST /api/4.0/query_tasks`, `GET /api/4.0/query_tasks/{id}/results`, and `GET /fields/{field}/suggestions`) using the **Viewer user's own OAuth Bearer token**.
+- **Security & Governance Guarantees**:
+  - **Row-Level Security & Access Grants Preserved**: Because query execution happens directly against Looker using the end user's personal OAuth token, Looker enforces all `access_filter` rules, `user_attributes`, database OAuth credentials, and `access_grant` restrictions natively.
+  - **License Efficiency**: End users remain strictly on **Viewer** licenses (`access_data` only), requiring only a single Standard User license for the shared metadata service account.
+

@@ -33,10 +33,12 @@ export function compileFiltersPayload(
     });
   }
 
-  // 3. User filters
+  // 3. User filters (combine multiple filters on the same field with ', ')
   userFilters.forEach((f) => {
     if (f.field && f.expr !== null && f.expr !== "") {
-      compiled[f.field] = f.expr;
+      compiled[f.field] = compiled[f.field]
+        ? `${compiled[f.field]}, ${f.expr}`
+        : f.expr;
     }
   });
 
@@ -90,16 +92,19 @@ export function runPromptsTests() {
   const combined = compileFiltersPayload(
     { "order_items.kpi_selector": "revenue" },
     [{ field: "users.country", values: ["USA"] }],
-    [{ field: "orders.status", expr: "complete" }]
+    [
+      { field: "orders.status", expr: "-cancelled" },
+      { field: "orders.status", expr: "-returned" },
+    ]
   );
   assertEqual(
     combined,
     {
       "order_items.kpi_selector": "revenue",
       "users.country": "USA",
-      "orders.status": "complete",
+      "orders.status": "-cancelled, -returned",
     },
-    "Combined parameters and filters compile properly"
+    "Combined parameters and multiple filters on the same field compile properly"
   );
 
   console.log("=== All Prompts and Parameter Tests Passed! ===");

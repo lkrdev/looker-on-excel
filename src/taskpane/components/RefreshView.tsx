@@ -58,6 +58,7 @@ const useStyles = makeStyles({
 interface RefreshViewProps {
   config: StoredSheetConfig;
   onRefresh: () => void;
+  onCancel?: () => void;
   onEdit: () => void;
   onNewQuery: () => void;
   isRefreshing: boolean;
@@ -68,6 +69,7 @@ interface RefreshViewProps {
 export const RefreshView: React.FC<RefreshViewProps> = ({
   config,
   onRefresh,
+  onCancel,
   onEdit,
   onNewQuery,
   isRefreshing,
@@ -143,6 +145,16 @@ export const RefreshView: React.FC<RefreshViewProps> = ({
         >
           {isRefreshing ? "Refreshing..." : "Refresh Data"}
         </Button>
+
+        {isRefreshing && onCancel && (
+          <Button
+            appearance="secondary"
+            onClick={onCancel}
+            style={{ color: lookerColors.red }}
+          >
+            Cancel Refresh
+          </Button>
+        )}
 
         <Button
           appearance="secondary"

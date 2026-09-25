@@ -60,17 +60,11 @@ export async function runQueryTask(
 
   const { id: taskId } = await createRes.json();
   let isCanceled = false;
+  const abortController = new AbortController();
 
   const cancel = async () => {
     isCanceled = true;
-    try {
-      await fetch(`${root}/api/4.0/running_queries/${taskId}`, {
-        method: "DELETE",
-        headers,
-      });
-    } catch (e) {
-      console.warn("Failed to cancel query task:", e);
-    }
+    abortController.abort();
   };
 
   const waitForResults = async (
@@ -81,27 +75,37 @@ export async function runQueryTask(
     while (!isCanceled) {
       const elapsed = Math.round((Date.now() - startTime) / 1000);
 
-      // Poll task info
-      const statusRes = await fetch(`${root}/api/4.0/query_tasks/${taskId}`, { headers });
-      if (!statusRes.ok) {
-        throw new Error(`Failed to check query task status (${statusRes.status})`);
-      }
-
-      const taskInfo = await statusRes.json();
-      const status = taskInfo.status || "running";
-      onStatus(status, elapsed);
-
-      if (status === "complete") {
-        const resultsRes = await fetch(
-          `${root}/api/4.0/query_tasks/${taskId}/results`,
-          { headers }
-        );
-        if (!resultsRes.ok) {
-          throw new Error(`Failed to fetch query results (${resultsRes.status})`);
+      try {
+        // Poll task info
+        const statusRes = await fetch(`${root}/api/4.0/query_tasks/${taskId}`, {
+          headers,
+          signal: abortController.signal,
+        });
+        if (!statusRes.ok) {
+          throw new Error(`Failed to check query task status (${statusRes.status})`);
         }
-        return await resultsRes.json();
-      } else if (status === "error" || status === "failed" || status === "killed") {
-        throw new Error(`Looker query failed with status: ${status}`);
+
+        const taskInfo = await statusRes.json();
+        const status = taskInfo.status || "running";
+        onStatus(status, elapsed);
+
+        if (status === "complete") {
+          const resultsRes = await fetch(
+            `${root}/api/4.0/query_tasks/${taskId}/results`,
+            { headers, signal: abortController.signal }
+          );
+          if (!resultsRes.ok) {
+            throw new Error(`Failed to fetch query results (${resultsRes.status})`);
+          }
+          return await resultsRes.json();
+        } else if (status === "error" || status === "failed" || status === "killed") {
+          throw new Error(`Looker query failed with status: ${status}`);
+        }
+      } catch (err: any) {
+        if (isCanceled || err?.name === "AbortError") {
+          throw new Error("Query was canceled by the user.");
+        }
+        throw err;
       }
 
       // Poll interval

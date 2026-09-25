@@ -43,26 +43,31 @@ flowchart TD
 ## Key Capabilities
 
 ### Looker CORS OAuth 2.0 with PKCE & Silent Refresh
+
 - Native browser-based OAuth 2.0 authentication utilizing Proof Key for Code Exchange (PKCE, RFC 7636).
 - Adheres to Looker's CORS API specification (`scope=cors_api`, 32-byte cryptographic state verification, direct token exchange at `POST /api/token`).
 - Operates securely across macOS WebKit, Windows WebView2, and Excel on the Web using the Office Dialog API to avoid third-party cookie restrictions and iframe blocking.
 - Implements proactive and silent token validation (`ensureValidToken`) to refresh expired sessions automatically on Excel relaunch and taskpane initialization.
 
 ### Field Discovery & Search
+
 - Search dimensions and measures across names, labels, short labels, view labels, field groups, and LookML metadata.
 - Provides field inspection popovers displaying descriptions, technical field identifiers, and data types.
 - Supports visual drag-and-drop reordering on selected field chips to customize column sequences.
 
 ### Pivots & Crosstab Grid Expansion
+
 - One-click pivot toggle on selected dimension chips.
 - Converts Looker nested crosstab responses into flattened Excel column matrices with hierarchical headers.
 - Preserves measure-specific formatting masks (currency, percentages, timestamps) across dynamically generated pivot columns.
 
 ### Multi-Field Sorting
+
 - Independent ASC and DESC sort toggling across selected dimension and measure chips.
 - Visual sort indicators with automatic multi-field precedence tracking.
 
 ### Required Prompts & Typed Filters
+
 - Detects required LookML parameters and `always_filter` declarations, displaying an interactive prompt dialog prior to query execution.
 - Specialized filter operators tailored to data types:
   - String filters: Live suggestion autocompletion via Looker's suggestions API.
@@ -70,19 +75,23 @@ flowchart TD
   - Numeric filters: Comparison operators (`=`, `!=`, `>`, `>=`, `<`, `<=`, `between`, `is_null`, `is_not_null`).
 
 ### High-Volume Asynchronous Streaming
+
 - Multi-step Looker query execution using `POST /api/4.0/queries` followed by `POST /api/4.0/query_tasks` with `result_format: "json"`.
 - Asynchronous polling with live elapsed time, row count counters, and query cancellation via `DELETE /api/4.0/running_queries/{id}`.
 - Flat key-value format keeps client memory consumption under 45 MB even on high-row queries (100,000+ rows).
 
 ### Adaptive Batch Cell Budgeting & Calculation Suspension
+
 - Dynamically calculates row chunk sizes based on column count (`batchSize = max(500, floor(35,000 / colCount))`) to guarantee write payloads remain well below the 4 MB Office.js transaction limit.
 - Suspends Excel screen updating and calculation engines during batch writes to eliminate UI stutter and freezing.
 
 ### Formula Auto-Expansion & Formatting Preservation
+
 - Detects custom Excel formulas placed in adjacent columns and automatically fills them down as data expands during refresh.
 - Preserves user custom formatting (fills, borders, font styles) on refreshed ranges.
 
 ### Workbook Persistence & Multi-Sheet Catalog
+
 - Query configurations (model, explore, fields, filters, sorts, column formats) are stored directly inside worksheet custom properties (`sheet.customProperties`) under the key `looker_query_config`.
 - Moving or emailing the `.xlsx` workbook preserves query configurations without writing any access tokens or secrets to the file.
 - Switching worksheet tabs automatically synchronizes the taskpane view. The header supports refreshing all connected Looker sheets in the workbook in a single sequence.
@@ -107,6 +116,9 @@ flowchart TD
    - Microsoft 365 / Office 2021 on macOS (v16.60+)
    - Excel on the Web (Office Online)
 3. Looker Instance: Version 23.0 or higher with network access from your browser and an OAuth Client Application registered.
+4. Looker User Permissions & Licensing:
+   - End users must be assigned a Looker role containing **`access_data`** and **`explore`** permissions on the target LookML models (Standard User or Developer license tier).
+   - The `explore` permission is required by Looker API 4.0 (`/api/4.0/lookml_models` and `/api/4.0/lookml_models/{model}/explores/{explore}`) to discover LookML models and Explore schemas.
 
 ---
 
@@ -230,21 +242,28 @@ The dev server starts on `https://localhost:3000`. You can verify by opening `ht
 Deploying the add-in across an enterprise organization follows standard Microsoft 365 Centralized Deployment:
 
 ### 1. Host Static Assets
+
 Host the compiled production distribution (`dist/`) on an enterprise HTTPS-enabled static web hosting service or CDN (e.g. Google Cloud Storage + Cloud CDN, Azure Blob Storage + Front Door, or AWS S3 + CloudFront).
 
 ### 2. Configure Production Manifest
+
 Update `manifest.xml` to point all endpoint references to your hosted domain:
+
 - Update `<SourceLocation>` URLs to `https://<your-production-domain>/taskpane.html`.
 - Update dialog and callback URLs to `https://<your-production-domain>/dialog-callback.html`.
 - Ensure the `Id` element contains a unique GUID for your organizational deployment.
 
 ### 3. Register Production OAuth Client in Looker
+
 In your Looker Admin console (Admin > Platform > API):
+
 - Register an OAuth Client Application with `redirect_uri` matching `https://<your-production-domain>/dialog-callback.html`.
 - Add `https://<your-production-domain>` to Looker's CORS / Embedded Domain allowlist.
 
 ### 4. Deploy via Microsoft 365 Admin Center
+
 Distribute the add-in to hundreds of users centrally without individual desktop installation:
+
 1. Navigate to **Microsoft 365 Admin Center** (`admin.microsoft.com`).
 2. Go to **Settings** > **Integrated apps** > **Upload custom apps**.
 3. Choose **Office Add-in** > **Upload manifest file (.xml)** and select your production `manifest.xml`.
@@ -284,16 +303,19 @@ Distribute the add-in to hundreds of users centrally without individual desktop 
 ## Verification & Testing
 
 Verify TypeScript compilation:
+
 ```bash
 npm run typecheck
 ```
 
 Execute unit test suites (number formatting, filter compiler, prompts, pivots & sorts, synonyms):
+
 ```bash
 npm test
 ```
 
 Compile production distribution:
+
 ```bash
 npm run build
 ```

@@ -14,6 +14,22 @@ export interface WriteOptions {
   nullDisplay?: string;
   destination?: "active" | "new";
   sheetName?: string;
+  targetSheetId?: string;
+  pivots?: string[];
+  prevRowCount?: number;
+  prevColCount?: number;
+}
+
+export function calculateBatchSize(colCount: number, targetCellBudget: number = 35000): number {
+  return Math.max(500, Math.floor(targetCellBudget / Math.max(1, colCount)));
+}
+
+function isNestedPivotObject(val: any): boolean {
+  if (val && typeof val === "object" && !Array.isArray(val)) {
+    const firstInner = Object.values(val)[0];
+    return Boolean(firstInner && typeof firstInner === "object");
+  }
+  return false;
 }
 
 /**
@@ -22,7 +38,8 @@ export interface WriteOptions {
  */
 export function expandPivotedColumns(
   columns: ColumnDefinition[],
-  dataRows: Record<string, any>[]
+  dataRows: Record<string, any>[],
+  pivots?: string[]
 ): { expandedColumns: ColumnDefinition[]; getValue: (row: Record<string, any>, col: ColumnDefinition) => any } {
   if (dataRows.length === 0) {
     return {
@@ -31,18 +48,22 @@ export function expandPivotedColumns(
     };
   }
 
-  // Check if any column contains nested pivot object { [pivotField]: { [pivotVal]: number } }
-  const sample = dataRows[0];
-  const hasNestedPivots = columns.some((col) => {
-    const val = sample[col.fieldKey];
-    if (val && typeof val === "object" && !Array.isArray(val)) {
-      const firstInner = Object.values(val)[0];
-      return firstInner && typeof firstInner === "object";
-    }
-    return false;
-  });
+  // Scan rows to find which columns are pivoted measures and collect discovered pivot dimension keys
+  const pivotedColSample = new Map<string, Record<string, any>>();
+  const discoveredPivotDims = new Set<string>(pivots || []);
 
-  if (!hasNestedPivots) {
+  for (const col of columns) {
+    for (const row of dataRows) {
+      const val = row[col.fieldKey];
+      if (isNestedPivotObject(val)) {
+        pivotedColSample.set(col.fieldKey, val);
+        Object.keys(val).forEach((pf) => discoveredPivotDims.add(pf));
+        break;
+      }
+    }
+  }
+
+  if (pivotedColSample.size === 0) {
     return {
       expandedColumns: columns,
       getValue: (row, col) => {
@@ -59,9 +80,13 @@ export function expandPivotedColumns(
   const pivotAccessorMap = new Map<string, { measureKey: string; pivotField: string; pivotVal: string }>();
 
   columns.forEach((col) => {
-    const val = sample[col.fieldKey];
-    if (val && typeof val === "object" && !Array.isArray(val)) {
-      // It's a pivoted measure! e.g. val = { "order_items.status": { "Complete": 123 } }
+    // Skip columns that are pivoted dimensions (since their values become column headers)
+    if (discoveredPivotDims.has(col.fieldKey)) {
+      return;
+    }
+
+    const val = pivotedColSample.get(col.fieldKey);
+    if (val) {
       const pivotFields = Object.keys(val);
       const pivotField = pivotFields[0];
 
@@ -147,24 +172,33 @@ export function computeResidualRanges(
   return { extraColRange, extraRowRange };
 }
 
+interface SavedFormulaColumn {
+  offset: number;
+  header: string;
+  formula: string;
+  numberFormat?: string;
+}
+
 export async function writeLookerDataToWorksheet(
   columns: ColumnDefinition[],
   dataRows: Record<string, any>[],
   options: WriteOptions,
   onProgress: (percent: number, currentRow: number) => void
 ): Promise<void> {
-  const TARGET_CELL_BUDGET = 35000;
-  const { expandedColumns, getValue } = expandPivotedColumns(columns, dataRows);
-  const colCount = expandedColumns.length;
+  const { expandedColumns, getValue } = expandPivotedColumns(columns, dataRows, options.pivots);
+  const colCount = Math.max(1, expandedColumns.length);
   const totalRows = dataRows.length;
-  const batchSize = Math.max(500, Math.floor(TARGET_CELL_BUDGET / Math.max(1, colCount)));
+  const batchSize = calculateBatchSize(colCount);
   const nullVal = options.nullDisplay ?? "";
 
   await Excel.run(async (context) => {
     let sheet: Excel.Worksheet;
+    const isCreatingNewSheet = options.destination === "new" && !options.targetSheetId;
 
-    // Resolve target worksheet based on destination option
-    if (options.destination === "new") {
+    // Resolve target worksheet based on targetSheetId or destination option
+    if (options.targetSheetId) {
+      sheet = context.workbook.worksheets.getItem(options.targetSheetId);
+    } else if (isCreatingNewSheet) {
       const sheets = context.workbook.worksheets;
       sheets.load(["items/name"]);
       await context.sync();
@@ -187,7 +221,7 @@ export async function writeLookerDataToWorksheet(
     }
     const app = context.workbook.application;
 
-    // 1. Suspend costly calculation & grid repainting
+    // 1. Suspend costly calculation mode during bulk write
     let prevCalcMode:
       | Excel.CalculationMode
       | "Automatic"
@@ -199,195 +233,286 @@ export async function writeLookerDataToWorksheet(
       await context.sync();
       prevCalcMode = app.calculationMode;
       app.calculationMode = Excel.CalculationMode.manual;
+      await context.sync();
     } catch (e) {
       console.warn("Calculation mode adjustment skipped or not supported:", e);
     }
-    app.suspendScreenUpdatingUntilNextSync();
-    app.suspendApiCalculationUntilNextSync();
-
-    // 2. Inspect adjacent column for user formulas (SAC Formula Auto-Expansion)
-    let hasAdjacentFormula = false;
-    let savedAdjacentFormula: string | null = null;
-    let savedAdjacentHeader: string | null = null;
-
-    if (options.autoExpandFormulas) {
-      try {
-        const adjacentCell = sheet.getRangeByIndexes(1, colCount, 1, 1);
-        const adjacentHeaderCell = sheet.getRangeByIndexes(0, colCount, 1, 1);
-        adjacentCell.load(["formulas"]);
-        adjacentHeaderCell.load(["values"]);
-        await context.sync();
-        const formulaVal = adjacentCell.formulas?.[0]?.[0];
-        if (typeof formulaVal === "string" && formulaVal.startsWith("=")) {
-          hasAdjacentFormula = true;
-          savedAdjacentFormula = formulaVal;
-          savedAdjacentHeader = (adjacentHeaderCell.values?.[0]?.[0] as string) || "Calculation";
-        }
-      } catch {
-        hasAdjacentFormula = false;
-      }
-    }
-
-    // 2.5 Clean existing tables & residual cell ranges (prevents ghost rows/columns on active sheet)
-    let prevTableRows = 0;
-    let prevTableCols = 0;
 
     try {
-      const existingTables = sheet.tables;
-      existingTables.load(["items/name"]);
-      await context.sync();
+      // 2. Inspect existing tables & used range FIRST, and convert tables to ranges
+      // CRITICAL: Converting existing Excel Tables to ranges BEFORE reading adjacent formulas
+      // forces Excel to automatically translate Table Structured References (e.g. =[@[Price]]*1.1)
+      // into standard A1 cell references (e.g. =C2*1.1) so they can be cleanly copied/expanded.
+      let prevTotalRows = options.prevRowCount ? options.prevRowCount + 1 : 0;
+      let prevTotalCols = options.prevColCount || 0;
+      let savedTableName: string | null = null;
 
-      if (existingTables.items.length > 0) {
-        for (const t of existingTables.items) {
-          try {
-            const tableRange = t.getRange();
-            tableRange.load(["rowCount", "columnCount"]);
+      if (!isCreatingNewSheet) {
+        try {
+          const existingTables = sheet.tables;
+          const usedRange = sheet.getUsedRangeOrNullObject(true);
+          existingTables.load(["items/name"]);
+          usedRange.load(["rowIndex", "rowCount", "columnIndex", "columnCount"]);
+          await context.sync();
+
+          if (!usedRange.isNullObject) {
+            prevTotalRows = Math.max(prevTotalRows, usedRange.rowIndex + usedRange.rowCount);
+            prevTotalCols = Math.max(prevTotalCols, usedRange.columnIndex + usedRange.columnCount);
+          }
+
+          if (existingTables.items.length > 0) {
+            savedTableName = existingTables.items[0].name;
+            const tableRanges = existingTables.items.map((t) => {
+              const tableRange = t.getRange();
+              tableRange.load(["rowIndex", "rowCount", "columnIndex", "columnCount"]);
+              return { table: t, tableRange };
+            });
             await context.sync();
-            prevTableRows = Math.max(prevTableRows, tableRange.rowCount);
-            prevTableCols = Math.max(prevTableCols, tableRange.columnCount);
-            t.convertToRange();
+
+            for (const { table, tableRange } of tableRanges) {
+              try {
+                prevTotalRows = Math.max(prevTotalRows, tableRange.rowIndex + tableRange.rowCount);
+                prevTotalCols = Math.max(prevTotalCols, tableRange.columnIndex + tableRange.columnCount);
+                table.convertToRange();
+              } catch (e) {
+                console.warn("Could not inspect/convert existing table:", e);
+              }
+            }
+            await context.sync();
+          }
+        } catch (err) {
+          console.warn("Could not inspect existing tables/usedRange:", err);
+        }
+      }
+
+      // 2.5 Inspect adjacent columns for user formulas (supports multiple contiguous formula columns)
+      const savedFormulaCols: SavedFormulaColumn[] = [];
+      const formulaScanStartCol = options.prevColCount && options.prevColCount > 0 ? options.prevColCount : colCount;
+      const maxFormulaColsToScan = 15;
+
+      if (!isCreatingNewSheet && options.autoExpandFormulas) {
+        try {
+          // Shift adjacent formula columns if Looker column count changed since previous run
+          if (options.prevColCount && options.prevColCount > 0 && options.prevColCount !== colCount && prevTotalCols > options.prevColCount) {
+            const checkRange = sheet.getRangeByIndexes(1, options.prevColCount, 1, 1);
+            checkRange.load(["formulas"]);
+            await context.sync();
+            const firstAdjFormula = checkRange.formulas?.[0]?.[0];
+            if (typeof firstAdjFormula === "string" && firstAdjFormula.startsWith("=")) {
+              const rowsToShift = Math.max(prevTotalRows, totalRows + 1, 2);
+              if (colCount > options.prevColCount) {
+                const insertRng = sheet.getRangeByIndexes(0, options.prevColCount, rowsToShift, colCount - options.prevColCount);
+                insertRng.insert(Excel.InsertShiftDirection.right);
+                await context.sync();
+                prevTotalCols += colCount - options.prevColCount;
+              } else if (colCount < options.prevColCount) {
+                const deleteRng = sheet.getRangeByIndexes(0, colCount, rowsToShift, options.prevColCount - colCount);
+                deleteRng.delete(Excel.DeleteShiftDirection.left);
+                await context.sync();
+                prevTotalCols = Math.max(colCount, prevTotalCols - (options.prevColCount - colCount));
+              }
+            }
+          }
+
+          const scanRange = sheet.getRangeByIndexes(0, colCount, 2, maxFormulaColsToScan);
+          scanRange.load(["formulas", "values", "numberFormat"]);
+          await context.sync();
+
+          for (let offset = 0; offset < maxFormulaColsToScan; offset++) {
+            const formulaCell = scanRange.formulas?.[1]?.[offset];
+            const headerVal = scanRange.values?.[0]?.[offset];
+            const numFmt = scanRange.numberFormat?.[1]?.[offset];
+
+            if (typeof formulaCell === "string" && formulaCell.startsWith("=")) {
+              savedFormulaCols.push({
+                offset,
+                header: headerVal !== null && headerVal !== undefined && String(headerVal).trim() !== ""
+                  ? String(headerVal)
+                  : `Calculation ${offset + 1}`,
+                formula: formulaCell,
+                numberFormat: typeof numFmt === "string" && numFmt !== "General" ? numFmt : undefined,
+              });
+            } else {
+              // Stop at first non-formula column
+              break;
+            }
+          }
+        } catch (e) {
+          console.warn("Formula inspection skipped:", e);
+        }
+      }
+
+      // 2.8 Clear residual rows and columns from previous larger runs
+      const protectedCols = colCount + savedFormulaCols.length;
+      if (!isCreatingNewSheet && (prevTotalRows > 0 || prevTotalCols > 0)) {
+        const { extraColRange, extraRowRange } = computeResidualRanges(
+          prevTotalRows,
+          prevTotalCols,
+          totalRows + 1,
+          protectedCols
+        );
+
+        if (extraColRange) {
+          try {
+            const colRng = sheet.getRangeByIndexes(
+              extraColRange.startRow,
+              extraColRange.startCol,
+              extraColRange.rowCount,
+              extraColRange.colCount
+            );
+            colRng.clear(Excel.ClearApplyTo.all);
           } catch (e) {
-            console.warn("Could not inspect/convert existing table:", e);
+            console.warn("Could not clear residual columns:", e);
+          }
+        }
+
+        if (extraRowRange) {
+          try {
+            const rowRng = sheet.getRangeByIndexes(
+              extraRowRange.startRow,
+              extraRowRange.startCol,
+              extraRowRange.rowCount,
+              extraRowRange.colCount
+            );
+            rowRng.clear(Excel.ClearApplyTo.all);
+          } catch (e) {
+            console.warn("Could not clear residual rows:", e);
           }
         }
         await context.sync();
       }
-    } catch (err) {
-      console.warn("Could not inspect existing tables:", err);
-    }
 
-    // If writing to existing active worksheet, clear any residual rows or columns from previous larger runs.
-    // If the user added an adjacent calculation column, exclude it from residual column wiping.
-    if (options.destination !== "new" && (prevTableRows > 0 || prevTableCols > 0)) {
-      const residualColsToProtect = hasAdjacentFormula ? 1 : 0;
-      const { extraColRange, extraRowRange } = computeResidualRanges(
-        prevTableRows,
-        prevTableCols,
-        totalRows + 1,
-        colCount + residualColsToProtect
-      );
+      // 3. Write Header (deduplicate labels if needed so Excel Table creation never fails on duplicate column names)
+      const seenHeaders = new Map<string, number>();
+      const uniqueHeaderLabels = expandedColumns.map((c) => {
+        const base = (c.label || c.fieldKey || "Column").trim();
+        const count = seenHeaders.get(base) || 0;
+        seenHeaders.set(base, count + 1);
+        return count === 0 ? base : `${base} (${count + 1})`;
+      });
 
-      if (extraColRange) {
-        try {
-          const colRng = sheet.getRangeByIndexes(
-            extraColRange.startRow,
-            extraColRange.startCol,
-            extraColRange.rowCount,
-            extraColRange.colCount
-          );
-          colRng.clear(Excel.ClearApplyTo.all);
-        } catch (e) {
-          console.warn("Could not clear residual columns:", e);
-        }
+      const headerRange = sheet.getRangeByIndexes(0, 0, 1, colCount);
+      headerRange.values = [uniqueHeaderLabels];
+      if (!options.preserveUserFormatting) {
+        headerRange.format.font.bold = true;
+        headerRange.format.fill.color = "#1D5288"; // Looker Brand Blue
+        headerRange.format.font.color = "#FFFFFF";
       }
 
-      if (extraRowRange) {
-        try {
-          const rowRng = sheet.getRangeByIndexes(
-            extraRowRange.startRow,
-            extraRowRange.startCol,
-            extraRowRange.rowCount,
-            extraRowRange.colCount
-          );
-          rowRng.clear(Excel.ClearApplyTo.all);
-        } catch (e) {
-          console.warn("Could not clear residual rows:", e);
-        }
+      if (options.freezeHeader !== false) {
+        sheet.freezePanes.freezeRows(1);
       }
       await context.sync();
-    }
 
-    // 3. Write Header
-    const headerRange = sheet.getRangeByIndexes(0, 0, 1, colCount);
-    headerRange.values = [expandedColumns.map((c) => c.label)];
-    if (!options.preserveUserFormatting) {
-      headerRange.format.font.bold = true;
-      headerRange.format.fill.color = "#1D5288"; // Looker Brand Blue
-      headerRange.format.font.color = "#FFFFFF";
-    }
+      // 4. Batch write data in dynamic chunks
+      let currentRow = 1;
+      for (let i = 0; i < totalRows; i += batchSize) {
+        const slice = dataRows.slice(i, i + batchSize);
+        const rowBlock: (string | number | boolean)[][] = slice.map((item) =>
+          expandedColumns.map((col) => {
+            const val = getValue(item, col);
+            if (val === null || val === undefined) {
+              return nullVal;
+            }
+            return val;
+          })
+        );
 
-    if (options.freezeHeader !== false) {
-      sheet.freezePanes.freezeRows(1);
-    }
+        const chunkRange = sheet.getRangeByIndexes(currentRow, 0, rowBlock.length, colCount);
+        chunkRange.values = rowBlock;
 
-    // 4. Batch write data in dynamic chunks
-    let currentRow = 1;
-    for (let i = 0; i < totalRows; i += batchSize) {
-      const slice = dataRows.slice(i, i + batchSize);
-      const rowBlock: (string | number | boolean)[][] = slice.map((item) =>
-        expandedColumns.map((col) => {
-          const val = getValue(item, col);
-          if (val === null || val === undefined) {
-            return nullVal;
-          }
-          return val;
-        })
-      );
-
-      const chunkRange = sheet.getRangeByIndexes(currentRow, 0, rowBlock.length, colCount);
-      chunkRange.values = rowBlock;
-
-      currentRow += rowBlock.length;
-      await context.sync();
-
-      onProgress(Math.min(100, Math.round((currentRow / totalRows) * 100)), currentRow);
-      // Yield to browser event loop for smooth UI rendering
-      await new Promise((r) => setTimeout(r, 0));
-    }
-
-    // 5. Apply Column-Level Number Formats (Dual-Channel Contract)
-    for (let c = 0; c < colCount; c++) {
-      const fmt = expandedColumns[c].excelFormat;
-      if (fmt && totalRows > 0) {
-        const colRange = sheet.getRangeByIndexes(1, c, totalRows, 1);
-        colRange.numberFormat = [[fmt]];
-      }
-    }
-
-    // 6. Sampled Autofit (Top 150 rows) to prevent freezing on 2.1M cells
-    const sampleRows = Math.min(totalRows + 1, 150);
-    const sampleRange = sheet.getRangeByIndexes(0, 0, sampleRows, colCount);
-    sampleRange.format.autofitColumns();
-
-    // 7. Auto-fill adjacent formula down if detected
-    if (options.autoExpandFormulas && hasAdjacentFormula && savedAdjacentFormula && totalRows >= 1) {
-      try {
-        if (savedAdjacentHeader) {
-          const headerCell = sheet.getRangeByIndexes(0, colCount, 1, 1);
-          headerCell.values = [[savedAdjacentHeader]];
-        }
-        const formulaOrigin = sheet.getRangeByIndexes(1, colCount, 1, 1);
-        formulaOrigin.formulas = [[savedAdjacentFormula]];
-        if (totalRows > 1) {
-          const formulaTarget = sheet.getRangeByIndexes(1, colCount, totalRows, 1);
-          formulaOrigin.autoFill(formulaTarget, Excel.AutoFillType.fillCopy);
-        }
-      } catch (e) {
-        console.warn("Could not auto-fill adjacent formula:", e);
-      }
-    }
-
-    // 8. Native Excel Table (ListObject) creation
-    try {
-      if (options.useExcelTable && totalRows > 0) {
-        const fullRange = sheet.getRangeByIndexes(0, 0, totalRows + 1, colCount);
-        const table = sheet.tables.add(fullRange, true /* hasHeaders */);
-        table.name = `Looker_${Date.now().toString().slice(-6)}`;
-        table.style = options.tableStyle || "TableStyleLight1";
+        currentRow += rowBlock.length;
         await context.sync();
-      }
-    } catch (err) {
-      console.warn("Could not configure native Excel table (ListObject):", err);
-    }
 
-    // 9. Restore calculation mode
-    if (prevCalcMode) {
-      try {
-        app.calculationMode = prevCalcMode;
-      } catch (e) {
-        console.warn("Could not restore calculationMode:", e);
+        onProgress(Math.min(100, Math.round((currentRow / totalRows) * 100)), currentRow);
+        // Yield to browser event loop for smooth UI rendering
+        await new Promise((r) => setTimeout(r, 0));
       }
+
+      // 5. Apply Column-Level Number Formats (isolated sync)
+      try {
+        if (totalRows > 0) {
+          for (let c = 0; c < colCount; c++) {
+            const fmt = expandedColumns[c]?.excelFormat;
+            if (fmt) {
+              const colRange = sheet.getRangeByIndexes(1, c, totalRows, 1);
+              colRange.numberFormat = [[fmt]];
+            }
+          }
+          await context.sync();
+        }
+      } catch (e) {
+        console.warn("Could not apply number formats:", e);
+      }
+
+      // 6. Restore & Auto-expand adjacent formula columns down to totalRows (isolated sync)
+      if (options.autoExpandFormulas && savedFormulaCols.length > 0 && totalRows >= 1) {
+        for (const fCol of savedFormulaCols) {
+          try {
+            const targetColIndex = colCount + fCol.offset;
+            const headerCell = sheet.getRangeByIndexes(0, targetColIndex, 1, 1);
+            headerCell.values = [[fCol.header]];
+
+            const formulaOrigin = sheet.getRangeByIndexes(1, targetColIndex, 1, 1);
+            formulaOrigin.formulas = [[fCol.formula]];
+            await context.sync();
+
+            if (totalRows > 1) {
+              const formulaTarget = sheet.getRangeByIndexes(1, targetColIndex, totalRows, 1);
+              try {
+                // copyFrom with RangeCopyType.formulas reliably shifts relative references (C2 -> C3..CN)
+                // across the entire target range even if cells previously contained values
+                formulaTarget.copyFrom(formulaOrigin, Excel.RangeCopyType.formulas);
+                await context.sync();
+              } catch {
+                formulaOrigin.autoFill(formulaTarget, Excel.AutoFillType.fillDefault);
+                await context.sync();
+              }
+            }
+
+            if (fCol.numberFormat) {
+              const fmtRange = sheet.getRangeByIndexes(1, targetColIndex, totalRows, 1);
+              fmtRange.numberFormat = [[fCol.numberFormat]];
+              await context.sync();
+            }
+          } catch (e) {
+            console.warn(`Could not auto-expand formula column at offset ${fCol.offset}:`, e);
+          }
+        }
+      }
+
+      // 7. Sampled Autofit (Top 150 rows) across Looker + formula columns
+      try {
+        const sampleRows = Math.min(totalRows + 1, 150);
+        const sampleRange = sheet.getRangeByIndexes(0, 0, sampleRows, protectedCols);
+        sampleRange.format.autofitColumns();
+        await context.sync();
+      } catch (e) {
+        console.warn("Autofit skipped:", e);
+      }
+
+      // 8. Native Excel Table (ListObject) creation across Looker + adjacent formula columns
+      try {
+        if (options.useExcelTable && totalRows > 0) {
+          const fullRange = sheet.getRangeByIndexes(0, 0, totalRows + 1, protectedCols);
+          const table = sheet.tables.add(fullRange, true /* hasHeaders */);
+          table.name = savedTableName || `Looker_${Date.now().toString().slice(-6)}`;
+          table.style = options.tableStyle || "TableStyleLight1";
+          await context.sync();
+        }
+      } catch (err) {
+        console.warn("Could not configure native Excel table (ListObject):", err);
+      }
+    } finally {
+      // 9. Always restore calculation mode
+      if (prevCalcMode) {
+        try {
+          app.calculationMode = prevCalcMode;
+        } catch (e) {
+          console.warn("Could not restore calculationMode:", e);
+        }
+      }
+      await context.sync();
     }
-    await context.sync();
   });
 }

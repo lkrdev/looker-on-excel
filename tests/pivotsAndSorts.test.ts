@@ -75,7 +75,39 @@ export function runPivotTests() {
   assertEqual(pivotResult.getValue(pivotedData[0], pivotResult.expandedColumns[2]), 185741.06, "Row 0 Cancelled sale price");
   assertEqual(pivotResult.getValue(pivotedData[1], pivotResult.expandedColumns[3]), 235471.79, "Row 1 Shipped sale price");
 
-  // 3. Residual Range Calculation (Overwrite & Cleaning safety)
+  // 3. Pivoted dimension in columns is automatically excluded from expandedColumns,
+  // and pivot detection works even when row 0 has null measure value
+  const pivotedWithDimColumn: ColumnDefinition[] = [
+    { fieldKey: "products.category", label: "Category", type: "string" },
+    { fieldKey: "order_items.status", label: "Status", type: "string" },
+    { fieldKey: "order_items.total_sale_price", label: "Total Sale Price", type: "number", excelFormat: "$#,##0.00" },
+  ];
+
+  const sparseRow0PivotData = [
+    {
+      "products.category": "Accessories",
+      "order_items.total_sale_price": null,
+    },
+    ...pivotedData,
+  ];
+
+  const sparsePivotResult = expandPivotedColumns(
+    pivotedWithDimColumn,
+    sparseRow0PivotData,
+    ["order_items.status"]
+  );
+  assertEqual(
+    sparsePivotResult.expandedColumns.length,
+    4,
+    "Pivoted dimension column is excluded and sparse row 0 still expands 3 status columns"
+  );
+  assertEqual(
+    sparsePivotResult.expandedColumns.some((c) => c.fieldKey === "order_items.status"),
+    false,
+    "Pivoted dimension fieldKey is not rendered as an empty column"
+  );
+
+  // 4. Residual Range Calculation (Overwrite & Cleaning safety)
   const shrinkRows = computeResidualRanges(500, 5, 200, 5);
   assertEqual(shrinkRows.extraColRange, null, "No extra columns when col count unchanged");
   assertEqual(
