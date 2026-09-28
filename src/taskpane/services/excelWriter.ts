@@ -184,21 +184,16 @@ export async function writeLookerDataToWorksheet(
   dataRows: Record<string, any>[],
   options: WriteOptions,
   onProgress: (percent: number, currentRow: number) => void
-): Promise<void> {
+): Promise<string> {
   const { expandedColumns, getValue } = expandPivotedColumns(columns, dataRows, options.pivots);
   const colCount = Math.max(1, expandedColumns.length);
   const totalRows = dataRows.length;
   const batchSize = calculateBatchSize(colCount);
   const nullVal = options.nullDisplay ?? "";
+  let writtenSheetId = "";
 
   await Excel.run(async (context) => {
-    let sheet: Excel.Worksheet;
-    const isCreatingNewSheet = options.destination === "new" && !options.targetSheetId;
-
-    // Resolve target worksheet based on targetSheetId or destination option
-    if (options.targetSheetId) {
-      sheet = context.workbook.worksheets.getItem(options.targetSheetId);
-    } else if (isCreatingNewSheet) {
+    const createNewLookerSheet = async (): Promise<Excel.Worksheet> => {
       const sheets = context.workbook.worksheets;
       sheets.load(["items/name"]);
       await context.sync();
@@ -213,12 +208,37 @@ export async function writeLookerDataToWorksheet(
         counter++;
       }
 
-      sheet = context.workbook.worksheets.add(targetName);
-      sheet.activate();
+      const newSheet = context.workbook.worksheets.add(targetName);
+      newSheet.activate();
+      newSheet.load(["id"]);
       await context.sync();
+      return newSheet;
+    };
+
+    let sheet: Excel.Worksheet;
+    let isCreatingNewSheet = options.destination === "new" && !options.targetSheetId;
+
+    // Resolve target worksheet based on targetSheetId or destination option
+    if (options.targetSheetId) {
+      const candidate = context.workbook.worksheets.getItemOrNullObject(options.targetSheetId);
+      candidate.load(["id", "isNullObject"]);
+      await context.sync();
+      if (!candidate.isNullObject) {
+        sheet = candidate;
+      } else {
+        sheet = context.workbook.worksheets.getActiveWorksheet();
+        sheet.load(["id"]);
+        await context.sync();
+      }
+    } else if (isCreatingNewSheet) {
+      sheet = await createNewLookerSheet();
     } else {
       sheet = context.workbook.worksheets.getActiveWorksheet();
+      sheet.load(["id"]);
+      await context.sync();
     }
+
+    writtenSheetId = sheet.id;
     const app = context.workbook.application;
 
     // 1. Suspend costly calculation mode during bulk write
@@ -239,111 +259,218 @@ export async function writeLookerDataToWorksheet(
     }
 
     try {
-      // 2. Inspect existing tables & used range FIRST, and convert tables to ranges
-      // CRITICAL: Converting existing Excel Tables to ranges BEFORE reading adjacent formulas
-      // forces Excel to automatically translate Table Structured References (e.g. =[@[Price]]*1.1)
-      // into standard A1 cell references (e.g. =C2*1.1) so they can be cleanly copied/expanded.
+      // 2. Inspect existing Looker table & PivotTables on this sheet.
+      // IMPORTANT: Never use sheet.getUsedRange() for prevTotalRows/Cols because usedRange
+      // includes any PivotTables or side-by-side analysis the user placed to the right or below
+      // the Looker table, which would cause clear() to throw:
+      // "The operation failed because it conflicts with a pivot table range."
       let prevTotalRows = options.prevRowCount ? options.prevRowCount + 1 : 0;
       let prevTotalCols = options.prevColCount || 0;
+      let existingTable: Excel.Table | null = null;
       let savedTableName: string | null = null;
+      let pivotRanges: Array<{ top: number; bottom: number; left: number; right: number }> = [];
 
       if (!isCreatingNewSheet) {
         try {
           const existingTables = sheet.tables;
-          const usedRange = sheet.getUsedRangeOrNullObject(true);
+          const sheetPivots = sheet.pivotTables;
           existingTables.load(["items/name"]);
-          usedRange.load(["rowIndex", "rowCount", "columnIndex", "columnCount"]);
+          sheetPivots.load(["items/name"]);
           await context.sync();
 
-          if (!usedRange.isNullObject) {
-            prevTotalRows = Math.max(prevTotalRows, usedRange.rowIndex + usedRange.rowCount);
-            prevTotalCols = Math.max(prevTotalCols, usedRange.columnIndex + usedRange.columnCount);
+          // Record bounding boxes of any PivotTables on the same worksheet so we never clear into them
+          if (sheetPivots.items.length > 0) {
+            const pLayouts = sheetPivots.items.map((pt) => {
+              const rng = pt.layout.getRange();
+              rng.load(["rowIndex", "rowCount", "columnIndex", "columnCount"]);
+              return rng;
+            });
+            await context.sync();
+            pivotRanges = pLayouts.map((r) => ({
+              top: r.rowIndex,
+              bottom: r.rowIndex + r.rowCount - 1,
+              left: r.columnIndex,
+              right: r.columnIndex + r.columnCount - 1,
+            }));
           }
 
           if (existingTables.items.length > 0) {
-            savedTableName = existingTables.items[0].name;
-            const tableRanges = existingTables.items.map((t) => {
-              const tableRange = t.getRange();
-              tableRange.load(["rowIndex", "rowCount", "columnIndex", "columnCount"]);
-              return { table: t, tableRange };
-            });
+            existingTable = existingTables.items[0];
+            savedTableName = existingTable.name;
+            const tableRange = existingTable.getRange();
+            tableRange.load(["rowIndex", "rowCount", "columnIndex", "columnCount"]);
             await context.sync();
 
-            for (const { table, tableRange } of tableRanges) {
-              try {
-                prevTotalRows = Math.max(prevTotalRows, tableRange.rowIndex + tableRange.rowCount);
-                prevTotalCols = Math.max(prevTotalCols, tableRange.columnIndex + tableRange.columnCount);
-                table.convertToRange();
-              } catch (e) {
-                console.warn("Could not inspect/convert existing table:", e);
-              }
+            prevTotalRows = Math.max(prevTotalRows, tableRange.rowIndex + tableRange.rowCount);
+            prevTotalCols = Math.max(prevTotalCols, tableRange.columnIndex + tableRange.columnCount);
+
+            // Only convert to range if the user explicitly unchecked "Create Native Excel Table"
+            if (!options.useExcelTable) {
+              existingTable.convertToRange();
+              existingTable = null;
+              await context.sync();
             }
-            await context.sync();
           }
         } catch (err) {
-          console.warn("Could not inspect existing tables/usedRange:", err);
+          console.warn("Could not inspect existing tables/pivots:", err);
         }
       }
 
-      // 2.5 Inspect adjacent columns for user formulas (supports multiple contiguous formula columns)
+      // Helper to check if a target range [r0..r1, c0..c1] overlaps any PivotTable on this worksheet
+      const overlapsPivotTable = (startRow: number, startCol: number, rowCount: number, colCount: number): boolean => {
+        const r1 = startRow + rowCount - 1;
+        const c1 = startCol + colCount - 1;
+        return pivotRanges.some(
+          (p) => !(r1 < p.top || startRow > p.bottom || c1 < p.left || startCol > p.right)
+        );
+      };
+
+      // 2.2 Guard against writing onto a PivotTable worksheet:
+      // If the resolved sheet has no Looker table and a PivotTable occupies the top-left write range
+      // (e.g., user created a PivotTable on a New Worksheet and triggered Import/Refresh while that
+      // PivotTable sheet was active), resolve the Looker source sheet or create a new sheet.
+      if (!isCreatingNewSheet && !existingTable && overlapsPivotTable(0, 0, Math.max(1, totalRows + 1), colCount)) {
+        const allSheets = context.workbook.worksheets;
+        allSheets.load(["items/id", "items/name"]);
+        await context.sync();
+
+        const propLookups = allSheets.items
+          .filter((s) => s.id !== sheet.id)
+          .map((s) => {
+            const props = s.customProperties;
+            const tbls = s.tables;
+            props.load(["items"]);
+            tbls.load(["items/name"]);
+            return { s, props, tbls };
+          });
+        await context.sync();
+
+        const sourceMatch = propLookups.find(({ props }) =>
+          props.items.some((p) => p.key === "looker_query_config")
+        );
+
+        if (sourceMatch) {
+          sheet = sourceMatch.s;
+          writtenSheetId = sheet.id;
+          pivotRanges = [];
+          if (sourceMatch.tbls.items.length > 0) {
+            existingTable = sourceMatch.tbls.items[0];
+            savedTableName = existingTable.name;
+            const tableRange = existingTable.getRange();
+            tableRange.load(["rowIndex", "rowCount", "columnIndex", "columnCount"]);
+            await context.sync();
+            prevTotalRows = Math.max(prevTotalRows, tableRange.rowIndex + tableRange.rowCount);
+            prevTotalCols = Math.max(prevTotalCols, tableRange.columnIndex + tableRange.columnCount);
+          }
+        } else {
+          sheet = await createNewLookerSheet();
+          writtenSheetId = sheet.id;
+          isCreatingNewSheet = true;
+          pivotRanges = [];
+        }
+      }
+
+      // 2.5 Inspect adjacent columns for user formulas & shift whole columns if Looker schema changed
       const savedFormulaCols: SavedFormulaColumn[] = [];
-      const formulaScanStartCol = options.prevColCount && options.prevColCount > 0 ? options.prevColCount : colCount;
       const maxFormulaColsToScan = 15;
 
-      if (!isCreatingNewSheet && options.autoExpandFormulas) {
+      if (!isCreatingNewSheet) {
         try {
-          // Shift adjacent formula columns if Looker column count changed since previous run
-          if (options.prevColCount && options.prevColCount > 0 && options.prevColCount !== colCount && prevTotalCols > options.prevColCount) {
-            const checkRange = sheet.getRangeByIndexes(1, options.prevColCount, 1, 1);
-            checkRange.load(["formulas"]);
+          // If Looker column count grew or shrank since the previous run, check if we need to shift
+          // whole columns so adjacent user formulas or side-by-side PivotTables move cleanly.
+          if (options.prevColCount && options.prevColCount > 0 && options.prevColCount !== colCount) {
+            const deltaCols = colCount - options.prevColCount;
+            const checkFormulaCell = sheet.getRangeByIndexes(1, options.prevColCount, 1, 1);
+            checkFormulaCell.load(["formulas"]);
             await context.sync();
-            const firstAdjFormula = checkRange.formulas?.[0]?.[0];
-            if (typeof firstAdjFormula === "string" && firstAdjFormula.startsWith("=")) {
-              const rowsToShift = Math.max(prevTotalRows, totalRows + 1, 2);
-              if (colCount > options.prevColCount) {
-                const insertRng = sheet.getRangeByIndexes(0, options.prevColCount, rowsToShift, colCount - options.prevColCount);
-                insertRng.insert(Excel.InsertShiftDirection.right);
+            const hasFormulaAtPrevBoundary =
+              typeof checkFormulaCell.formulas?.[0]?.[0] === "string" &&
+              checkFormulaCell.formulas[0][0].startsWith("=");
+            const hasPivotToRight = pivotRanges.some((p) => p.left >= options.prevColCount!);
+
+            if (deltaCols > 0 && (hasFormulaAtPrevBoundary || overlapsPivotTable(0, options.prevColCount, Math.max(prevTotalRows, totalRows + 1), deltaCols))) {
+              // Insert entire worksheet columns so Excel shifts formulas AND any PivotTables to the right as a whole unit
+              const insertColRng = sheet
+                .getRangeByIndexes(0, options.prevColCount, 1, deltaCols)
+                .getEntireColumn();
+              insertColRng.insert(Excel.InsertShiftDirection.right);
+              await context.sync();
+              prevTotalCols += deltaCols;
+              pivotRanges = pivotRanges.map((p) =>
+                p.left >= options.prevColCount!
+                  ? { ...p, left: p.left + deltaCols, right: p.right + deltaCols }
+                  : p
+              );
+            } else if (deltaCols < 0 && hasFormulaAtPrevBoundary && !hasPivotToRight) {
+              const colsToRemove = Math.abs(deltaCols);
+              if (!overlapsPivotTable(0, colCount, prevTotalRows, colsToRemove)) {
+                const deleteColRng = sheet
+                  .getRangeByIndexes(0, colCount, 1, colsToRemove)
+                  .getEntireColumn();
+                deleteColRng.delete(Excel.DeleteShiftDirection.left);
                 await context.sync();
-                prevTotalCols += colCount - options.prevColCount;
-              } else if (colCount < options.prevColCount) {
-                const deleteRng = sheet.getRangeByIndexes(0, colCount, rowsToShift, options.prevColCount - colCount);
-                deleteRng.delete(Excel.DeleteShiftDirection.left);
-                await context.sync();
-                prevTotalCols = Math.max(colCount, prevTotalCols - (options.prevColCount - colCount));
+                prevTotalCols = Math.max(colCount, prevTotalCols - colsToRemove);
               }
             }
           }
 
-          const scanRange = sheet.getRangeByIndexes(0, colCount, 2, maxFormulaColsToScan);
-          scanRange.load(["formulas", "values", "numberFormat"]);
-          await context.sync();
+          if (options.autoExpandFormulas) {
+            const scanRange = sheet.getRangeByIndexes(0, colCount, 2, maxFormulaColsToScan);
+            scanRange.load(["formulas", "values", "numberFormat"]);
+            await context.sync();
 
-          for (let offset = 0; offset < maxFormulaColsToScan; offset++) {
-            const formulaCell = scanRange.formulas?.[1]?.[offset];
-            const headerVal = scanRange.values?.[0]?.[offset];
-            const numFmt = scanRange.numberFormat?.[1]?.[offset];
+            for (let offset = 0; offset < maxFormulaColsToScan; offset++) {
+              // Do not scan into a PivotTable
+              if (overlapsPivotTable(0, colCount + offset, 2, 1)) {
+                break;
+              }
+              const formulaCell = scanRange.formulas?.[1]?.[offset];
+              const headerVal = scanRange.values?.[0]?.[offset];
+              const numFmt = scanRange.numberFormat?.[1]?.[offset];
 
-            if (typeof formulaCell === "string" && formulaCell.startsWith("=")) {
-              savedFormulaCols.push({
-                offset,
-                header: headerVal !== null && headerVal !== undefined && String(headerVal).trim() !== ""
-                  ? String(headerVal)
-                  : `Calculation ${offset + 1}`,
-                formula: formulaCell,
-                numberFormat: typeof numFmt === "string" && numFmt !== "General" ? numFmt : undefined,
-              });
-            } else {
-              // Stop at first non-formula column
-              break;
+              if (typeof formulaCell === "string" && formulaCell.startsWith("=")) {
+                savedFormulaCols.push({
+                  offset,
+                  header:
+                    headerVal !== null && headerVal !== undefined && String(headerVal).trim() !== ""
+                      ? String(headerVal)
+                      : `Calculation ${offset + 1}`,
+                  formula: formulaCell,
+                  numberFormat:
+                    typeof numFmt === "string" && numFmt !== "General" ? numFmt : undefined,
+                });
+              } else {
+                break;
+              }
             }
           }
         } catch (e) {
-          console.warn("Formula inspection skipped:", e);
+          console.warn("Formula inspection / column shift skipped:", e);
         }
       }
 
-      // 2.8 Clear residual rows and columns from previous larger runs
       const protectedCols = colCount + savedFormulaCols.length;
+
+      // 2.7 If an existing native Excel Table is shrinking in rows or columns,
+      // shrink-resize the Table BEFORE clearing residual cells so the residual cells are outside the Table.
+      if (
+        existingTable &&
+        options.useExcelTable &&
+        totalRows > 0 &&
+        (totalRows + 1 < prevTotalRows || protectedCols < prevTotalCols)
+      ) {
+        try {
+          const shrinkRows = Math.min(prevTotalRows, totalRows + 1);
+          const shrinkCols = Math.min(prevTotalCols, protectedCols);
+          const shrinkRange = sheet.getRangeByIndexes(0, 0, shrinkRows, shrinkCols);
+          existingTable.resize(shrinkRange);
+          await context.sync();
+        } catch (e) {
+          console.warn("Pre-clear table shrink resize skipped:", e);
+        }
+      }
+
+      // 2.8 Clear residual rows and columns from previous larger runs (skipping any PivotTable range)
       if (!isCreatingNewSheet && (prevTotalRows > 0 || prevTotalCols > 0)) {
         const { extraColRange, extraRowRange } = computeResidualRanges(
           prevTotalRows,
@@ -352,7 +479,15 @@ export async function writeLookerDataToWorksheet(
           protectedCols
         );
 
-        if (extraColRange) {
+        if (
+          extraColRange &&
+          !overlapsPivotTable(
+            extraColRange.startRow,
+            extraColRange.startCol,
+            extraColRange.rowCount,
+            extraColRange.colCount
+          )
+        ) {
           try {
             const colRng = sheet.getRangeByIndexes(
               extraColRange.startRow,
@@ -361,12 +496,21 @@ export async function writeLookerDataToWorksheet(
               extraColRange.colCount
             );
             colRng.clear(Excel.ClearApplyTo.all);
+            await context.sync();
           } catch (e) {
             console.warn("Could not clear residual columns:", e);
           }
         }
 
-        if (extraRowRange) {
+        if (
+          extraRowRange &&
+          !overlapsPivotTable(
+            extraRowRange.startRow,
+            extraRowRange.startCol,
+            extraRowRange.rowCount,
+            extraRowRange.colCount
+          )
+        ) {
           try {
             const rowRng = sheet.getRangeByIndexes(
               extraRowRange.startRow,
@@ -375,28 +519,37 @@ export async function writeLookerDataToWorksheet(
               extraRowRange.colCount
             );
             rowRng.clear(Excel.ClearApplyTo.all);
+            await context.sync();
           } catch (e) {
             console.warn("Could not clear residual rows:", e);
           }
         }
-        await context.sync();
       }
 
-      // 3. Write Header (deduplicate labels if needed so Excel Table creation never fails on duplicate column names)
+      // 3. Write Header (deduplicate labels across Looker + preserved formula columns so Excel Table headers are always unique)
       const seenHeaders = new Map<string, number>();
-      const uniqueHeaderLabels = expandedColumns.map((c) => {
-        const base = (c.label || c.fieldKey || "Column").trim();
+      const deduplicateHeader = (raw: string): string => {
+        const base = (raw || "Column").trim();
         const count = seenHeaders.get(base) || 0;
         seenHeaders.set(base, count + 1);
         return count === 0 ? base : `${base} (${count + 1})`;
-      });
+      };
 
-      const headerRange = sheet.getRangeByIndexes(0, 0, 1, colCount);
-      headerRange.values = [uniqueHeaderLabels];
+      const uniqueHeaderLabels = expandedColumns.map((c) =>
+        deduplicateHeader(c.label || c.fieldKey || "Column")
+      );
+      const uniqueFormulaHeaders = savedFormulaCols.map((fCol) =>
+        deduplicateHeader(fCol.header)
+      );
+
+      const allHeaderLabels = [...uniqueHeaderLabels, ...uniqueFormulaHeaders];
+      const headerRange = sheet.getRangeByIndexes(0, 0, 1, protectedCols);
+      headerRange.values = [allHeaderLabels];
       if (!options.preserveUserFormatting) {
-        headerRange.format.font.bold = true;
-        headerRange.format.fill.color = "#1D5288"; // Looker Brand Blue
-        headerRange.format.font.color = "#FFFFFF";
+        const lookerHeaderRange = sheet.getRangeByIndexes(0, 0, 1, colCount);
+        lookerHeaderRange.format.font.bold = true;
+        lookerHeaderRange.format.fill.color = "#1D5288"; // Looker Brand Blue
+        lookerHeaderRange.format.font.color = "#FFFFFF";
       }
 
       if (options.freezeHeader !== false) {
@@ -429,7 +582,28 @@ export async function writeLookerDataToWorksheet(
         await new Promise((r) => setTimeout(r, 0));
       }
 
-      // 5. Apply Column-Level Number Formats (isolated sync)
+      // 5. Resize or Create Native Excel Table (ListObject) BEFORE formula expansion
+      // so Table Structured References (e.g. =[@[Sale Price]]*0.2) remain valid inside the Table!
+      try {
+        if (options.useExcelTable && totalRows > 0) {
+          const fullRange = sheet.getRangeByIndexes(0, 0, totalRows + 1, protectedCols);
+          if (existingTable) {
+            existingTable.resize(fullRange);
+            if (options.tableStyle) {
+              existingTable.style = options.tableStyle;
+            }
+          } else {
+            const table = sheet.tables.add(fullRange, true /* hasHeaders */);
+            table.name = savedTableName || `Looker_${Date.now().toString().slice(-6)}`;
+            table.style = options.tableStyle || "TableStyleLight1";
+          }
+          await context.sync();
+        }
+      } catch (err) {
+        console.warn("Could not configure/resize native Excel table (ListObject):", err);
+      }
+
+      // 6. Apply Column-Level Number Formats (isolated sync)
       try {
         if (totalRows > 0) {
           for (let c = 0; c < colCount; c++) {
@@ -445,13 +619,14 @@ export async function writeLookerDataToWorksheet(
         console.warn("Could not apply number formats:", e);
       }
 
-      // 6. Restore & Auto-expand adjacent formula columns down to totalRows (isolated sync)
+      // 7. Restore & Auto-expand adjacent formula columns down to totalRows (isolated sync)
       if (options.autoExpandFormulas && savedFormulaCols.length > 0 && totalRows >= 1) {
-        for (const fCol of savedFormulaCols) {
+        for (let idx = 0; idx < savedFormulaCols.length; idx++) {
+          const fCol = savedFormulaCols[idx];
           try {
             const targetColIndex = colCount + fCol.offset;
             const headerCell = sheet.getRangeByIndexes(0, targetColIndex, 1, 1);
-            headerCell.values = [[fCol.header]];
+            headerCell.values = [[uniqueFormulaHeaders[idx]]];
 
             const formulaOrigin = sheet.getRangeByIndexes(1, targetColIndex, 1, 1);
             formulaOrigin.formulas = [[fCol.formula]];
@@ -460,8 +635,6 @@ export async function writeLookerDataToWorksheet(
             if (totalRows > 1) {
               const formulaTarget = sheet.getRangeByIndexes(1, targetColIndex, totalRows, 1);
               try {
-                // copyFrom with RangeCopyType.formulas reliably shifts relative references (C2 -> C3..CN)
-                // across the entire target range even if cells previously contained values
                 formulaTarget.copyFrom(formulaOrigin, Excel.RangeCopyType.formulas);
                 await context.sync();
               } catch {
@@ -481,7 +654,7 @@ export async function writeLookerDataToWorksheet(
         }
       }
 
-      // 7. Sampled Autofit (Top 150 rows) across Looker + formula columns
+      // 8. Sampled Autofit (Top 150 rows) across Looker + formula columns
       try {
         const sampleRows = Math.min(totalRows + 1, 150);
         const sampleRange = sheet.getRangeByIndexes(0, 0, sampleRows, protectedCols);
@@ -491,20 +664,15 @@ export async function writeLookerDataToWorksheet(
         console.warn("Autofit skipped:", e);
       }
 
-      // 8. Native Excel Table (ListObject) creation across Looker + adjacent formula columns
+      // 9. Automatically refresh all PivotTables in the workbook that depend on this data
       try {
-        if (options.useExcelTable && totalRows > 0) {
-          const fullRange = sheet.getRangeByIndexes(0, 0, totalRows + 1, protectedCols);
-          const table = sheet.tables.add(fullRange, true /* hasHeaders */);
-          table.name = savedTableName || `Looker_${Date.now().toString().slice(-6)}`;
-          table.style = options.tableStyle || "TableStyleLight1";
-          await context.sync();
-        }
-      } catch (err) {
-        console.warn("Could not configure native Excel table (ListObject):", err);
+        context.workbook.pivotTables.refreshAll();
+        await context.sync();
+      } catch (e) {
+        console.warn("PivotTable auto-refresh skipped:", e);
       }
     } finally {
-      // 9. Always restore calculation mode
+      // 10. Always restore calculation mode
       if (prevCalcMode) {
         try {
           app.calculationMode = prevCalcMode;
@@ -515,4 +683,6 @@ export async function writeLookerDataToWorksheet(
       await context.sync();
     }
   });
+
+  return writtenSheetId;
 }

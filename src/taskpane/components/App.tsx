@@ -74,6 +74,7 @@ export const App: React.FC = () => {
   // View state: 'builder' | 'refresh'
   const [activeView, setActiveView] = useState<"builder" | "refresh">("builder");
   const [sheetConfig, setSheetConfig] = useState<StoredSheetConfig | null>(null);
+  const [sourceSheetId, setSourceSheetId] = useState<string | null>(null);
 
   // Catalog state
   const [models, setModels] = useState<ModelSummary[]>([]);
@@ -109,6 +110,7 @@ export const App: React.FC = () => {
 
   const activeTaskRef = useRef<QueryTaskController | null>(null);
   const lastActiveSheetIdRef = useRef<string | null>(null);
+  const sourceSheetIdRef = useRef<string | null>(null);
   const skipDefaultPromptsRef = useRef<boolean>(false);
 
   // Validate / refresh token on taskpane mount / relaunch of Excel
@@ -124,39 +126,70 @@ export const App: React.FC = () => {
     }
   }, []);
 
-  // Check active sheet metadata; only switch activeView when the worksheet tab actually changes
+  // Check active sheet metadata; only switch activeView when the effective Looker source sheet changes
   const checkSheetMetadata = useCallback(async (forceViewSync: boolean = false) => {
-    const { sheetId, config } = await getActiveSheetInfo();
-    const sheetChanged = sheetId !== null && sheetId !== lastActiveSheetIdRef.current;
+    const {
+      activeSheetId,
+      sourceSheetId: resolvedSourceId,
+      config,
+      isPivotSheet,
+    } = await getActiveSheetInfo(sourceSheetIdRef.current);
 
-    if (forceViewSync || sheetChanged || lastActiveSheetIdRef.current === null) {
-      lastActiveSheetIdRef.current = sheetId;
+    const activeChanged =
+      activeSheetId !== null && activeSheetId !== lastActiveSheetIdRef.current;
+    const sourceChanged = resolvedSourceId !== sourceSheetIdRef.current;
+
+    if (forceViewSync || activeChanged || lastActiveSheetIdRef.current === null) {
+      lastActiveSheetIdRef.current = activeSheetId;
+      sourceSheetIdRef.current = resolvedSourceId;
+      setSourceSheetId(resolvedSourceId);
       setSheetConfig(config);
-      setActiveView(config ? "refresh" : "builder");
+
+      // Switch view on initial load, forced sync, or when switching between different Looker source sheets
+      if (forceViewSync || sourceChanged || !isPivotSheet) {
+        setActiveView(config ? "refresh" : "builder");
+      }
     }
   }, []);
 
-  // Listen for worksheet switches
+  // Listen for worksheet switches (both selection changes and worksheet tab activation)
   useEffect(() => {
     checkSheetMetadata(true);
 
-    const onSelectionChange = () => {
+    const onSheetOrSelectionChange = () => {
       checkSheetMetadata(false);
     };
 
     if (window.Office && Office.context && Office.context.document) {
       Office.context.document.addHandlerAsync(
         Office.EventType.DocumentSelectionChanged,
-        onSelectionChange
+        onSheetOrSelectionChange
       );
+    }
+
+    let activationHandlerResult: OfficeExtension.EventHandlerResult<Excel.WorksheetActivatedEventArgs> | null =
+      null;
+    if (typeof Excel !== "undefined" && typeof Excel.run === "function") {
+      Excel.run(async (context) => {
+        activationHandlerResult = context.workbook.worksheets.onActivated.add(async () => {
+          onSheetOrSelectionChange();
+        });
+        await context.sync();
+      }).catch(() => {});
     }
 
     return () => {
       if (window.Office && Office.context && Office.context.document) {
         Office.context.document.removeHandlerAsync(
           Office.EventType.DocumentSelectionChanged,
-          onSelectionChange
+          onSheetOrSelectionChange
         );
+      }
+      if (activationHandlerResult && typeof Excel !== "undefined") {
+        Excel.run(activationHandlerResult.context, async (context) => {
+          activationHandlerResult?.remove();
+          await context.sync();
+        }).catch(() => {});
       }
     };
   }, [checkSheetMetadata]);
@@ -334,6 +367,8 @@ export const App: React.FC = () => {
   // Start fresh query from scratch, defaulting destination to new sheet to protect existing tables
   const handleStartNewQuery = () => {
     setSheetConfig(null);
+    sourceSheetIdRef.current = null;
+    setSourceSheetId(null);
     setSelectedFields([]);
     setSorts([]);
     setPivots([]);
@@ -468,9 +503,13 @@ export const App: React.FC = () => {
         pivots.length > 0 ? pivots : undefined
       ).expandedColumns.length;
 
+      const targetSheetId =
+        destination === "active" && sourceSheetId ? sourceSheetId : undefined;
+
       const writeOptions: WriteOptions = {
         ...tableOptions,
         destination,
+        targetSheetId,
         sheetName: exploreDetail.label || selectedExplore || "Looker Data",
         pivots: pivots.length > 0 ? pivots : undefined,
         prevRowCount: destination === "active" ? sheetConfig?.rowCount : undefined,
@@ -479,17 +518,23 @@ export const App: React.FC = () => {
             ? sheetConfig?.options?.prevColCount ?? sheetConfig?.columns?.length
             : undefined,
       };
-      await writeLookerDataToWorksheet(columns, dataRows, writeOptions, (pct) => {
-        setProgressPercent(pct);
-      });
+      const writtenSheetId = await writeLookerDataToWorksheet(
+        columns,
+        dataRows,
+        writeOptions,
+        (pct) => {
+          setProgressPercent(pct);
+        }
+      );
 
-      // 5. Persist metadata for one-click refresh
+      // 5. Persist metadata for one-click refresh on the actual Looker data worksheet
       const config: StoredSheetConfig = {
         queryPayload,
         columns,
         options: {
           ...writeOptions,
           destination: "active",
+          targetSheetId: undefined,
           prevRowCount: dataRows.length,
           prevColCount: expandedColCount,
         },
@@ -500,7 +545,11 @@ export const App: React.FC = () => {
         filters,
         promptValues,
       };
-      await saveSheetMetadata(config);
+      await saveSheetMetadata(config, writtenSheetId || targetSheetId);
+      if (writtenSheetId) {
+        sourceSheetIdRef.current = writtenSheetId;
+        setSourceSheetId(writtenSheetId);
+      }
       await checkSheetMetadata(true);
     } catch (err: any) {
       setErrorMessage(err.message || "Query execution failed.");
@@ -510,7 +559,7 @@ export const App: React.FC = () => {
     }
   };
 
-  // Re-run Refresh on active sheet
+  // Re-run Refresh on active (or source) Looker sheet
   const handleRefreshActive = async () => {
     if (!auth || !sheetConfig) return;
 
@@ -544,12 +593,13 @@ export const App: React.FC = () => {
       ).expandedColumns.length;
 
       setStatusText(`Writing ${dataRows.length.toLocaleString()} rows...`);
-      await writeLookerDataToWorksheet(
+      const writtenSheetId = await writeLookerDataToWorksheet(
         sheetConfig.columns,
         dataRows,
         {
           ...sheetConfig.options,
           destination: "active",
+          targetSheetId: sourceSheetId || undefined,
           pivots: activePivots,
           prevRowCount: sheetConfig.rowCount,
           prevColCount: sheetConfig.options?.prevColCount ?? sheetConfig.columns.length,
@@ -562,13 +612,14 @@ export const App: React.FC = () => {
         options: {
           ...sheetConfig.options,
           destination: "active",
+          targetSheetId: undefined,
           prevRowCount: dataRows.length,
           prevColCount: expandedColCount,
         },
         lastRefreshed: new Date().toISOString(),
         rowCount: dataRows.length,
       };
-      await saveSheetMetadata(updatedConfig);
+      await saveSheetMetadata(updatedConfig, writtenSheetId || sourceSheetId || undefined);
       setSheetConfig(updatedConfig);
     } catch (err: any) {
       setErrorMessage(err.message || "Failed to refresh data.");
