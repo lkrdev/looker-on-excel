@@ -9,6 +9,7 @@ module.exports = async (env, options) => {
 
   if (isDev) {
     try {
+      await devCerts.ensureCertificatesAreInstalled(365);
       httpsOptions = await devCerts.getHttpsServerOptions();
     } catch (e) {
       console.warn("Using default self-signed HTTPS options", e);

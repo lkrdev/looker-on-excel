@@ -29,21 +29,60 @@ export interface FieldDefinition {
 export interface ParameterDefinition {
   name: string;
   label: string;
+  label_short?: string;
+  view_label?: string;
   type?: string;
-  default_value?: string;
+  default_value?: string | null;
+  default_filter_value?: string | null;
+  has_allowed_values?: boolean;
+  enumerations?: Array<{ label: string; value: string }> | null;
+}
+
+export interface AlwaysFilterItem {
+  field: string;
+  values: string[];
+  name?: string;
+  value?: string;
 }
 
 export interface ExploreDetail {
   id: string;
   name: string;
   label: string;
-  always_filter?: Array<{ field: string; values: string[] }>;
+  always_filter?: AlwaysFilterItem[];
   conditionally_filter?: Array<{ fields: string[]; values: string[] }>;
   fields: {
     dimensions: FieldDefinition[];
     measures: FieldDefinition[];
     parameters?: ParameterDefinition[];
   };
+}
+
+/**
+ * Normalizes Looker API 4.0 `always_filter` items (which return `{ name, value }`)
+ * and legacy/test `{ field, values }` shapes into a consistent AlwaysFilterItem[].
+ */
+export function normalizeAlwaysFilters(
+  raw?: Array<{ name?: string; value?: string; field?: string; values?: string[] }> | null
+): AlwaysFilterItem[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item) => {
+      const field = (item.field || item.name || "").trim();
+      const values =
+        Array.isArray(item.values) && item.values.length > 0
+          ? item.values
+          : item.value !== undefined && item.value !== null && String(item.value).trim() !== ""
+          ? [String(item.value).trim()]
+          : [];
+      return {
+        field,
+        values,
+        name: item.name || field,
+        value: item.value ?? values.join(", "),
+      };
+    })
+    .filter((item) => item.field !== "");
 }
 
 export interface UserSummary {
@@ -90,7 +129,7 @@ export async function getExplore(
   explore: string
 ): Promise<ExploreDetail> {
   const fields =
-    "id,name,label,always_filter,conditionally_filter,fields(dimensions(name,label,label_short,type,value_format,value_format_name,view_label,description,field_group_label,field_group_variant,dimension_group,synonyms),measures(name,label,label_short,type,value_format,value_format_name,view_label,description,field_group_label,field_group_variant,synonyms),parameters(name,label,type,default_value,synonyms))";
+    "id,name,label,always_filter,conditionally_filter,fields(dimensions(name,label,label_short,type,value_format,value_format_name,view_label,description,field_group_label,field_group_variant,dimension_group,synonyms),measures(name,label,label_short,type,value_format,value_format_name,view_label,description,field_group_label,field_group_variant,synonyms),parameters(name,label,label_short,view_label,type,default_value,default_filter_value,has_allowed_values,enumerations,synonyms))";
   const url = `${baseUrl.replace(/\/$/, "")}/api/4.0/lookml_models/${encodeURIComponent(model)}/explores/${encodeURIComponent(explore)}?fields=${encodeURIComponent(fields)}`;
 
   const res = await fetch(url, {
@@ -102,6 +141,7 @@ export async function getExplore(
   }
 
   const data: ExploreDetail = await res.json();
+  data.always_filter = normalizeAlwaysFilters(data.always_filter as any);
 
   // Tag categories for easy UI consumption
   if (data.fields?.dimensions) {
@@ -109,6 +149,13 @@ export async function getExplore(
   }
   if (data.fields?.measures) {
     data.fields.measures.forEach((m) => (m.category = "measure"));
+  }
+  if (data.fields?.parameters) {
+    data.fields.parameters.forEach((p) => {
+      if (!p.default_value && p.default_filter_value) {
+        p.default_value = p.default_filter_value;
+      }
+    });
   }
 
   return data;

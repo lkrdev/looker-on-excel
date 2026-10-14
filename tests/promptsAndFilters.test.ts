@@ -1,4 +1,4 @@
-import { ParameterDefinition, ExploreDetail } from "../src/taskpane/services/lookerClient";
+import { ParameterDefinition, ExploreDetail, normalizeAlwaysFilters } from "../src/taskpane/services/lookerClient";
 
 function assertEqual(actual: any, expected: any, testName: string) {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
@@ -105,6 +105,29 @@ export function runPromptsTests() {
       "orders.status": "-cancelled, -returned",
     },
     "Combined parameters and multiple filters on the same field compile properly"
+  );
+
+  // Case 7: Looker API 4.0 native { name, value } always_filter format normalizes & compiles
+  const normalizedApiFormat = normalizeAlwaysFilters([
+    { name: "orders.status", value: "-NULL" },
+  ]);
+  assertEqual(
+    normalizedApiFormat,
+    [
+      {
+        field: "orders.status",
+        values: ["-NULL"],
+        name: "orders.status",
+        value: "-NULL",
+      },
+    ],
+    "Looker API 4.0 { name, value } always_filter normalizes to { field, values }"
+  );
+  const compiledApiAlwaysFilter = compileFiltersPayload({}, normalizedApiFormat, []);
+  assertEqual(
+    compiledApiAlwaysFilter,
+    { "orders.status": "-NULL" },
+    "Normalized Looker API 4.0 always_filter default applied"
   );
 
   console.log("=== All Prompts and Parameter Tests Passed! ===");

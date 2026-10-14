@@ -778,8 +778,13 @@ export const App: React.FC = () => {
                 <PromptsDialog
                   parameters={exploreDetail.fields.parameters}
                   alwaysFilters={exploreDetail.always_filter}
+                  fields={[...exploreDetail.fields.dimensions, ...exploreDetail.fields.measures]}
                   promptValues={promptValues}
                   onPromptChange={(k, v) => setPromptValues((prev) => ({ ...prev, [k]: v }))}
+                  baseUrl={auth?.baseUrl}
+                  token={auth?.accessToken}
+                  modelName={selectedModel}
+                  exploreName={selectedExplore}
                 />
 
                 <FieldPicker

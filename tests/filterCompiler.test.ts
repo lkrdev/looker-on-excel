@@ -3,6 +3,8 @@ import {
   isNumberField,
   isStringField,
   compileFilterToLookerExpression,
+  parseLookerExpressionToFilterCondition,
+  toggleMultiValueToken,
   FilterCondition,
 } from "../src/taskpane/components/FilterBuilder";
 import { FieldDefinition } from "../src/taskpane/services/lookerClient";
@@ -134,6 +136,43 @@ export function runFilterCompilerTests() {
     null,
     "Date is any time returns null (no filter)"
   );
+
+  // 5. Multi-value String Filter Expressions & Toggle
+  assertEqual(
+    compileFilterToLookerExpression({ id: "18", field: "users.status", operator: "is", value: "Complete, Shipped" }, stringField),
+    "Complete, Shipped",
+    "Multi-value string is"
+  );
+  assertEqual(
+    compileFilterToLookerExpression({ id: "19", field: "users.status", operator: "is_not", value: "Cancelled, Returned" }, stringField),
+    "-Cancelled, -Returned",
+    "Multi-value string is_not prefixes each item with -"
+  );
+  assertEqual(
+    compileFilterToLookerExpression({ id: "20", field: "users.status", operator: "contains", value: "gold, silver" }, stringField),
+    "%gold%, %silver%",
+    "Multi-value string contains wraps each item with %"
+  );
+  assertEqual(
+    toggleMultiValueToken("Complete", "Shipped"),
+    "Complete, Shipped",
+    "toggleMultiValueToken appends new token"
+  );
+  assertEqual(
+    toggleMultiValueToken("Complete, Shipped", "Complete"),
+    "Shipped",
+    "toggleMultiValueToken removes existing token"
+  );
+
+  // 6. Parsing Looker Expressions back to FilterCondition (always_filter hydration)
+  const parsedNotNull = parseLookerExpressionToFilterCondition("users.status", "-NULL", stringField);
+  assertEqual(parsedNotNull.operator, "is_not_null", "Parses -NULL as is_not_null");
+  const parsedMultiNot = parseLookerExpressionToFilterCondition("users.status", "-Cancelled, -Returned", stringField);
+  assertEqual(parsedMultiNot.operator, "is_not", "Parses -Cancelled, -Returned operator as is_not");
+  assertEqual(parsedMultiNot.value, "Cancelled, Returned", "Parses -Cancelled, -Returned value cleanly");
+  const parsedDate = parseLookerExpressionToFilterCondition("orders.created_date", "30 days", dateField);
+  assertEqual(parsedDate.operator, "is_in_the_last", "Parses 30 days as is_in_the_last");
+  assertEqual(parsedDate.value, "30", "Parses 30 days value as 30");
 
   console.log("=== All Filter Compiler Tests Passed! ===\n");
 }
