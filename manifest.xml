@@ -11,7 +11,7 @@
   <ProviderName>Looker / Google Cloud</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
   <DisplayName DefaultValue="Looker for Excel" />
-  <Description DefaultValue="Connect Microsoft Excel directly to Looker models and explores with high-volume streaming and native Excel PivotTable integration." />
+  <Description DefaultValue="Connect Microsoft Excel directly to Looker models and explores with high-volume streaming, custom functions (=LOOKER.VALUE / =LOOKER.QUERY), and native Excel PivotTable integration." />
   <IconUrl DefaultValue="https://localhost:3000/assets/icon-32.png" />
   <HighResolutionIconUrl DefaultValue="https://localhost:3000/assets/icon-64.png" />
   <SupportUrl DefaultValue="https://cloud.google.com/looker" />
@@ -22,6 +22,13 @@
   <Hosts>
     <Host Name="Workbook" />
   </Hosts>
+
+  <Requirements>
+    <Sets DefaultMinVersion="1.1">
+      <Set Name="SharedRuntime" MinVersion="1.1"/>
+      <Set Name="CustomFunctionsRuntime" MinVersion="1.1"/>
+    </Sets>
+  </Requirements>
   
   <DefaultSettings>
     <SourceLocation DefaultValue="https://localhost:3000/taskpane.html" />
@@ -32,6 +39,23 @@
   <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
     <Hosts>
       <Host xsi:type="Workbook">
+        <Runtimes>
+          <Runtime resid="Taskpane.Url" lifetime="long" />
+        </Runtimes>
+        <AllFormFactors>
+          <ExtensionPoint xsi:type="CustomFunctions">
+            <Script>
+              <SourceLocation resid="Functions.Script.Url"/>
+            </Script>
+            <Page>
+              <SourceLocation resid="Taskpane.Url"/>
+            </Page>
+            <Metadata>
+              <SourceLocation resid="Functions.Metadata.Url"/>
+            </Metadata>
+            <Namespace resid="Functions.Namespace"/>
+          </ExtensionPoint>
+        </AllFormFactors>
         <DesktopFormFactor>
           <GetStarted>
             <Title resid="GetStarted.Title"/>
@@ -80,8 +104,11 @@
       <bt:Urls>
         <bt:Url id="GetStarted.LearnMoreUrl" DefaultValue="https://cloud.google.com/looker" />
         <bt:Url id="Taskpane.Url" DefaultValue="https://localhost:3000/taskpane.html" />
+        <bt:Url id="Functions.Script.Url" DefaultValue="https://localhost:3000/taskpane.bundle.js" />
+        <bt:Url id="Functions.Metadata.Url" DefaultValue="https://localhost:3000/assets/functions.json" />
       </bt:Urls>
       <bt:ShortStrings>
+        <bt:String id="Functions.Namespace" DefaultValue="LOOKER" />
         <bt:String id="GetStarted.Title" DefaultValue="Welcome to Looker for Excel" />
         <bt:String id="Looker.TabLabel" DefaultValue="Looker" />
         <bt:String id="Looker.GroupLabel" DefaultValue="Looker Analytics" />

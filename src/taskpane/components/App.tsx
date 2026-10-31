@@ -50,6 +50,7 @@ import {
   getAllWorkbookLookerSheets,
   StoredSheetConfig,
 } from "../services/sheetMetadata";
+import { clearCustomFunctionCache } from "../../functions/functions";
 
 const useStyles = makeStyles({
   appRoot: {
@@ -658,6 +659,7 @@ export const App: React.FC = () => {
   // Re-run Refresh on active (or source) Looker table
   const handleRefreshActive = async () => {
     if (!auth || !sheetConfig) return;
+    clearCustomFunctionCache();
 
     setIsExecuting(true);
     setStatusText("Submitting refresh query...");
@@ -761,6 +763,7 @@ export const App: React.FC = () => {
   // Global "Refresh All" across workbook (including all tables on multi-table sheets)
   const handleRefreshAll = async () => {
     if (!auth) return;
+    clearCustomFunctionCache();
     setRefreshingAll(true);
     setErrorMessage(null);
     try {
