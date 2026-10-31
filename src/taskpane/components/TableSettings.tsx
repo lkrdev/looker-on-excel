@@ -9,13 +9,15 @@ import {
   Radio,
   Caption1,
   Input,
+  Button,
   Accordion,
   AccordionItem,
   AccordionHeader,
   AccordionPanel,
 } from "@fluentui/react-components";
-import { TableSettingsRegular } from "@fluentui/react-icons";
+import { TableSettingsRegular, TargetRegular } from "@fluentui/react-icons";
 import { WriteOptions } from "../services/excelWriter";
+import { getActiveCellAddress } from "../services/sheetMetadata";
 
 const useStyles = makeStyles({
   container: {
@@ -110,15 +112,55 @@ export const TableSettings: React.FC<TableSettingsProps> = ({
               {/* Destination */}
               <div className={styles.row}>
                 <Label size="small" weight="semibold">
-                  Destination
+                  Destination & Anchor Cell
                 </Label>
                 <RadioGroup
                   value={destination}
                   onChange={(_, data) => onDestinationChange(data.value as "active" | "new")}
                 >
-                  <Radio value="active" label="Insert into Active Worksheet (A1)" />
+                  <Radio value="active" label="Insert into Active Worksheet" />
                   <Radio value="new" label="Create New Worksheet" />
                 </RadioGroup>
+                {destination === "active" && (
+                  <div
+                    style={{
+                      marginLeft: "28px",
+                      marginTop: "4px",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "4px",
+                    }}
+                  >
+                    <Label size="small">Start Cell (Top-Left Anchor)</Label>
+                    <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+                      <Input
+                        size="small"
+                        placeholder="A1"
+                        value={options.anchorCell || "A1"}
+                        onChange={(_, data) =>
+                          onOptionsChange({
+                            anchorCell: data.value.toUpperCase().trim() || "A1",
+                          })
+                        }
+                        style={{ width: "84px" }}
+                      />
+                      <Button
+                        size="small"
+                        appearance="secondary"
+                        icon={<TargetRegular />}
+                        onClick={async () => {
+                          const addr = await getActiveCellAddress();
+                          onOptionsChange({ anchorCell: addr, tableId: `Looker_${addr}` });
+                        }}
+                      >
+                        Use Selected Cell
+                      </Button>
+                    </div>
+                    <Caption1 style={{ color: tokens.colorNeutralForeground3 }}>
+                      Place multiple Looker tables side-by-side (e.g. A1, H1, B25).
+                    </Caption1>
+                  </div>
+                )}
                 {destination === "new" && (
                   <div style={{ marginLeft: "28px", marginTop: "4px", display: "flex", flexDirection: "column", gap: "2px" }}>
                     <Label size="small">Worksheet Name</Label>

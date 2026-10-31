@@ -9,6 +9,7 @@ import {
   Button,
   ProgressBar,
   Divider,
+  Badge,
 } from "@fluentui/react-components";
 import {
   ArrowSyncRegular,
@@ -16,6 +17,7 @@ import {
   AddRegular,
   TableRegular,
   ClockRegular,
+  TargetRegular,
 } from "@fluentui/react-icons";
 import { LookerIcon } from "./LookerLogo";
 import { lookerColors } from "../theme/lookerTheme";
@@ -27,6 +29,15 @@ const useStyles = makeStyles({
     display: "flex",
     flexDirection: "column",
     gap: "16px",
+  },
+  switcherBar: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: "6px",
+    padding: "8px",
+    backgroundColor: tokens.colorNeutralBackground2,
+    borderRadius: "6px",
+    border: `1px solid ${tokens.colorNeutralStroke2}`,
   },
   card: {
     backgroundColor: tokens.colorNeutralBackground1,
@@ -57,6 +68,9 @@ const useStyles = makeStyles({
 
 interface RefreshViewProps {
   config: StoredSheetConfig;
+  allSheetTables?: StoredSheetConfig[];
+  onSelectTable?: (tableConfig: StoredSheetConfig) => void;
+  onAddTableToSheet?: () => void;
   onRefresh: () => void;
   onCancel?: () => void;
   onEdit: () => void;
@@ -68,6 +82,9 @@ interface RefreshViewProps {
 
 export const RefreshView: React.FC<RefreshViewProps> = ({
   config,
+  allSheetTables = [],
+  onSelectTable,
+  onAddTableToSheet,
   onRefresh,
   onCancel,
   onEdit,
@@ -82,8 +99,35 @@ export const RefreshView: React.FC<RefreshViewProps> = ({
     ? new Date(config.lastRefreshed).toLocaleString()
     : "Unknown";
 
+  const anchorLabel = config.anchorCell || config.options?.anchorCell || "A1";
+
   return (
     <div className={styles.container}>
+      {allSheetTables.length > 1 && (
+        <div>
+          <Caption1 style={{ fontWeight: 600, display: "block", marginBottom: "4px" }}>
+            Tables on Worksheet ({allSheetTables.length})
+          </Caption1>
+          <div className={styles.switcherBar}>
+            {allSheetTables.map((tbl, idx) => {
+              const tAnchor = tbl.anchorCell || tbl.options?.anchorCell || "A1";
+              const isSelected =
+                (tbl.tableId && tbl.tableId === config.tableId) || tAnchor === anchorLabel;
+              return (
+                <Button
+                  key={tbl.tableId || `${tAnchor}_${idx}`}
+                  size="small"
+                  appearance={isSelected ? "primary" : "outline"}
+                  onClick={() => onSelectTable && onSelectTable(tbl)}
+                >
+                  {tbl.exploreLabel || tbl.queryPayload.view} ({tAnchor})
+                </Button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       <Card className={styles.card}>
         <div
           style={{
@@ -95,9 +139,14 @@ export const RefreshView: React.FC<RefreshViewProps> = ({
         <CardHeader
           image={<LookerIcon size={28} variant="color" />}
           header={
-            <Body1 style={{ fontWeight: 600 }}>
-              {config.exploreLabel || config.queryPayload.view}
-            </Body1>
+            <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+              <Body1 style={{ fontWeight: 600 }}>
+                {config.exploreLabel || config.queryPayload.view}
+              </Body1>
+              <Badge appearance="tint" color="brand" size="small">
+                {anchorLabel}
+              </Badge>
+            </div>
           }
           description={
             <Caption1 style={{ color: tokens.colorNeutralForeground3 }}>
@@ -113,6 +162,10 @@ export const RefreshView: React.FC<RefreshViewProps> = ({
               <strong>{config.rowCount.toLocaleString()}</strong> rows ·{" "}
               <strong>{config.columns.length}</strong> columns
             </span>
+          </div>
+          <div className={styles.metaItem}>
+            <TargetRegular style={{ color: tokens.colorNeutralForeground3 }} />
+            <span>Start Cell Anchor: <strong>{anchorLabel}</strong></span>
           </div>
           <div className={styles.metaItem}>
             <ClockRegular style={{ color: tokens.colorNeutralForeground3 }} />
@@ -143,7 +196,7 @@ export const RefreshView: React.FC<RefreshViewProps> = ({
           disabled={isRefreshing}
           style={{ backgroundColor: lookerColors.blueDark }}
         >
-          {isRefreshing ? "Refreshing..." : "Refresh Data"}
+          {isRefreshing ? "Refreshing..." : `Refresh Table (${anchorLabel})`}
         </Button>
 
         {isRefreshing && onCancel && (
@@ -165,13 +218,24 @@ export const RefreshView: React.FC<RefreshViewProps> = ({
           Edit Query & Filters
         </Button>
 
+        {onAddTableToSheet && (
+          <Button
+            appearance="outline"
+            icon={<TargetRegular />}
+            onClick={onAddTableToSheet}
+            disabled={isRefreshing}
+          >
+            Add Another Table to This Sheet
+          </Button>
+        )}
+
         <Button
           appearance="subtle"
           icon={<AddRegular />}
           onClick={onNewQuery}
           disabled={isRefreshing}
         >
-          Build New Query
+          Build New Query (New Sheet)
         </Button>
       </div>
     </div>
