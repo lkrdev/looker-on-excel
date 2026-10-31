@@ -26,6 +26,12 @@ import {
   ReorderRegular,
 } from "@fluentui/react-icons";
 import { FieldDefinition } from "../services/lookerClient";
+import {
+  resolveExploreHierarchies,
+  getFieldHierarchyContext,
+  expandFieldInSelection,
+  collapseFieldInSelection,
+} from "../services/hierarchyResolver";
 
 const useStyles = makeStyles({
   container: {
@@ -202,6 +208,11 @@ export const FieldPicker: React.FC<FieldPickerProps> = ({
   const allFields = useMemo(
     () => [...dimensions, ...measures],
     [dimensions, measures]
+  );
+
+  const hierarchyLadders = useMemo(
+    () => resolveExploreHierarchies(dimensions),
+    [dimensions]
   );
 
   // Filter fields based on search (including LookML synonyms)
@@ -449,6 +460,75 @@ export const FieldPicker: React.FC<FieldPickerProps> = ({
                     />
                   )}
                   <span style={{ fontWeight: 500 }}>{def?.label || fieldKey}</span>
+
+                  {/* Hierarchy Drill / Collapse Badges for Dimensions */}
+                  {isDimension &&
+                    onReorderFields &&
+                    (() => {
+                      const hCtx = getFieldHierarchyContext(fieldKey, hierarchyLadders);
+                      if (!hCtx) return null;
+                      const canDrillChild =
+                        hCtx.childField && !selectedFields.includes(hCtx.childField);
+                      const childDef = hCtx.childField
+                        ? allFields.find((f) => f.name === hCtx.childField)
+                        : null;
+                      const canCollapseSelf =
+                        hCtx.parentField && selectedFields.includes(hCtx.parentField);
+
+                      return (
+                        <>
+                          {canDrillChild && (
+                            <span
+                              title={`Expand hierarchy to ${childDef?.label || hCtx.childField}`}
+                              style={{
+                                cursor: "pointer",
+                                fontSize: "10px",
+                                fontWeight: 600,
+                                padding: "1px 5px",
+                                borderRadius: "8px",
+                                backgroundColor: tokens.colorPaletteTealBackground2,
+                                color: tokens.colorPaletteTealForeground2,
+                              }}
+                              onClick={() => {
+                                const { fields } = expandFieldInSelection(
+                                  selectedFields,
+                                  fieldKey,
+                                  hierarchyLadders,
+                                  "insert_child"
+                                );
+                                onReorderFields(fields);
+                              }}
+                            >
+                              +Drill
+                            </span>
+                          )}
+                          {canCollapseSelf && (
+                            <span
+                              title={`Collapse ${def?.label || fieldKey} hierarchy level`}
+                              style={{
+                                cursor: "pointer",
+                                fontSize: "10px",
+                                fontWeight: 600,
+                                padding: "1px 5px",
+                                borderRadius: "8px",
+                                backgroundColor: tokens.colorNeutralBackground3,
+                                color: tokens.colorNeutralForeground2,
+                              }}
+                              onClick={() => {
+                                const { fields } = collapseFieldInSelection(
+                                  selectedFields,
+                                  hCtx.parentField!,
+                                  hierarchyLadders
+                                );
+                                onReorderFields(fields);
+                              }}
+                            >
+                              -Collapse
+                            </span>
+                          )}
+                        </>
+                      );
+                    })()}
 
                   {/* Pivot Toggle for Dimensions */}
                   {isDimension && onTogglePivot && (

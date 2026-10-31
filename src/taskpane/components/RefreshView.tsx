@@ -10,6 +10,7 @@ import {
   ProgressBar,
   Divider,
   Badge,
+  Input,
 } from "@fluentui/react-components";
 import {
   ArrowSyncRegular,
@@ -22,6 +23,15 @@ import {
 import { LookerIcon } from "./LookerLogo";
 import { lookerColors } from "../theme/lookerTheme";
 import { StoredSheetConfig } from "../services/sheetMetadata";
+import { FieldDefinition } from "../services/lookerClient";
+import { QueryPayload } from "../services/queryTaskRunner";
+import {
+  resolveExploreHierarchies,
+  getFieldHierarchyContext,
+  expandFieldInSelection,
+  collapseFieldInSelection,
+  buildRowDrillQueryPayload,
+} from "../services/hierarchyResolver";
 
 const useStyles = makeStyles({
   container: {
@@ -69,8 +79,10 @@ const useStyles = makeStyles({
 interface RefreshViewProps {
   config: StoredSheetConfig;
   allSheetTables?: StoredSheetConfig[];
+  exploreDimensions?: FieldDefinition[];
   onSelectTable?: (tableConfig: StoredSheetConfig) => void;
   onAddTableToSheet?: () => void;
+  onApplyDrillPayload?: (updatedPayload: QueryPayload) => void;
   onRefresh: () => void;
   onCancel?: () => void;
   onEdit: () => void;
@@ -83,8 +95,10 @@ interface RefreshViewProps {
 export const RefreshView: React.FC<RefreshViewProps> = ({
   config,
   allSheetTables = [],
+  exploreDimensions = [],
   onSelectTable,
   onAddTableToSheet,
+  onApplyDrillPayload,
   onRefresh,
   onCancel,
   onEdit,
@@ -94,12 +108,33 @@ export const RefreshView: React.FC<RefreshViewProps> = ({
   progressPercent,
 }) => {
   const styles = useStyles();
+  const [drillFilterValue, setDrillFilterValue] = React.useState("");
 
   const formattedDate = config.lastRefreshed
     ? new Date(config.lastRefreshed).toLocaleString()
     : "Unknown";
 
   const anchorLabel = config.anchorCell || config.options?.anchorCell || "A1";
+
+  const hierarchyLadders = React.useMemo(
+    () => resolveExploreHierarchies(exploreDimensions),
+    [exploreDimensions]
+  );
+
+  const dimByName = React.useMemo(() => {
+    const map = new Map<string, FieldDefinition>();
+    exploreDimensions.forEach((d) => map.set(d.name, d));
+    return map;
+  }, [exploreDimensions]);
+
+  const activeTableFields = config.queryPayload.fields || [];
+  const hierarchicalFields = activeTableFields
+    .map((fName) => ({
+      fieldName: fName,
+      label: dimByName.get(fName)?.label_short || dimByName.get(fName)?.label || fName,
+      ctx: getFieldHierarchyContext(fName, hierarchyLadders),
+    }))
+    .filter((item) => item.ctx !== null);
 
   return (
     <div className={styles.container}>
@@ -173,6 +208,105 @@ export const RefreshView: React.FC<RefreshViewProps> = ({
           </div>
         </div>
       </Card>
+
+      {hierarchicalFields.length > 0 && onApplyDrillPayload && (
+        <Card className={styles.card}>
+          <div style={{ padding: "10px 12px", display: "flex", flexDirection: "column", gap: "8px" }}>
+            <Caption1 style={{ fontWeight: 600 }}>Hierarchy Expand / Collapse & Drill</Caption1>
+            <Input
+              size="small"
+              placeholder="Optional: Filter value for row drill (e.g. 2025)"
+              value={drillFilterValue}
+              onChange={(_, d) => setDrillFilterValue(d.value)}
+            />
+            {hierarchicalFields.map(({ fieldName, label, ctx }) => {
+              if (!ctx) return null;
+              const childField = ctx.childField;
+              const childLabel = childField
+                ? dimByName.get(childField)?.label_short ||
+                  dimByName.get(childField)?.label ||
+                  childField
+                : null;
+              const canExpand = Boolean(childField && !activeTableFields.includes(childField));
+              const hasExpandedDescendant = ctx.ladder.levels
+                .slice(ctx.levelIndex + 1)
+                .some((lv) => activeTableFields.includes(lv));
+              const canCollapse = hasExpandedDescendant || Boolean(ctx.parentField);
+
+              return (
+                <div
+                  key={fieldName}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: "6px",
+                    fontSize: "12px",
+                  }}
+                >
+                  <span style={{ fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {label}
+                  </span>
+                  <div style={{ display: "flex", gap: "4px", flexShrink: 0 }}>
+                    {canExpand && childField && (
+                      <Button
+                        size="small"
+                        appearance="outline"
+                        disabled={isRefreshing}
+                        onClick={() => {
+                          if (drillFilterValue.trim()) {
+                            const nextPayload = buildRowDrillQueryPayload(
+                              config.queryPayload,
+                              fieldName,
+                              drillFilterValue.trim(),
+                              childField,
+                              true
+                            );
+                            onApplyDrillPayload(nextPayload);
+                          } else {
+                            const { fields } = expandFieldInSelection(
+                              activeTableFields,
+                              fieldName,
+                              hierarchyLadders,
+                              "insert_child"
+                            );
+                            onApplyDrillPayload({
+                              ...config.queryPayload,
+                              fields,
+                            });
+                          }
+                        }}
+                      >
+                        + {childLabel}
+                      </Button>
+                    )}
+                    {canCollapse && (
+                      <Button
+                        size="small"
+                        appearance="subtle"
+                        disabled={isRefreshing}
+                        onClick={() => {
+                          const { fields } = collapseFieldInSelection(
+                            activeTableFields,
+                            fieldName,
+                            hierarchyLadders
+                          );
+                          onApplyDrillPayload({
+                            ...config.queryPayload,
+                            fields,
+                          });
+                        }}
+                      >
+                        - Collapse
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+      )}
 
       {isRefreshing && (
         <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>

@@ -161,6 +161,10 @@ export const App: React.FC = () => {
     if (config) {
       setSheetConfig(config);
       preferredTableIdRef.current = config.tableId || null;
+      if (config.queryPayload?.model && config.queryPayload?.view) {
+        setSelectedModel(config.queryPayload.model);
+        setSelectedExplore(config.queryPayload.view);
+      }
     }
 
     if (forceViewSync || activeChanged || lastActiveSheetIdRef.current === null) {
@@ -659,8 +663,8 @@ export const App: React.FC = () => {
     }
   };
 
-  // Re-run Refresh on active (or source) Looker table
-  const handleRefreshActive = async () => {
+  // Re-run Refresh on active (or source) Looker table (optionally with an expanded/collapsed hierarchy payload)
+  const handleRefreshActive = async (overridePayload?: QueryPayload) => {
     if (!auth || !sheetConfig) return;
     clearCustomFunctionCache();
 
@@ -675,10 +679,46 @@ export const App: React.FC = () => {
         setAuth(validAuth);
       }
 
+      const basePayload = overridePayload || sheetConfig.queryPayload;
+      const allAvailableFields = exploreDetail
+        ? [...exploreDetail.fields.dimensions, ...exploreDetail.fields.measures]
+        : [];
+
+      const activeColumns: ColumnDefinition[] = overridePayload
+        ? (basePayload.fields || []).map((fieldKey) => {
+            const existingCol = sheetConfig.columns.find((c) => c.fieldKey === fieldKey);
+            if (existingCol) return existingCol;
+            const def = allAvailableFields.find((f) => f.name === fieldKey);
+            return {
+              fieldKey,
+              label: def?.label || fieldKey,
+              type: def?.type,
+              excelFormat: def ? resolveExcelNumberFormat(def) : undefined,
+              category: def?.category,
+            };
+          })
+        : sheetConfig.columns;
+
+      const activePivots = basePayload.pivots || undefined;
+      const nonPivotDims = (basePayload.fields || []).filter((fName) => {
+        const col = activeColumns.find((c) => c.fieldKey === fName);
+        const def = allAvailableFields.find((f) => f.name === fName);
+        const isDim = (col?.category || def?.category || "dimension") === "dimension";
+        return isDim && !(activePivots || []).includes(fName);
+      });
+
+      const effectivePayload: QueryPayload = {
+        ...basePayload,
+        subtotals:
+          sheetConfig.options?.includeSubtotals && nonPivotDims.length >= 2
+            ? nonPivotDims.slice(0, -1)
+            : null,
+      };
+
       const controller = await runQueryTask(
         validAuth.baseUrl,
         validAuth.accessToken,
-        sheetConfig.queryPayload
+        effectivePayload
       );
       activeTaskRef.current = controller;
 
@@ -687,12 +727,11 @@ export const App: React.FC = () => {
       });
       const dataRows = bundle.rows;
 
-      const activePivots = sheetConfig.queryPayload.pivots || undefined;
       const expandedColCount = expandPivotedColumns(
-        sheetConfig.columns,
+        activeColumns,
         dataRows,
         activePivots,
-        Boolean(sheetConfig.queryPayload.row_total)
+        Boolean(effectivePayload.row_total)
       ).expandedColumns.length;
 
       const effectiveAnchor = (
@@ -710,7 +749,7 @@ export const App: React.FC = () => {
 
       setStatusText(`Writing ${dataRows.length.toLocaleString()} rows...`);
       const writtenSheetId = await writeLookerDataToWorksheet(
-        sheetConfig.columns,
+        activeColumns,
         dataRows,
         {
           ...sheetConfig.options,
@@ -737,6 +776,8 @@ export const App: React.FC = () => {
         ...sheetConfig,
         tableId: effectiveTableId,
         anchorCell: effectiveAnchor,
+        queryPayload: effectivePayload,
+        columns: activeColumns,
         options: {
           ...sheetConfig.options,
           anchorCell: effectiveAnchor,
@@ -1103,12 +1144,14 @@ export const App: React.FC = () => {
         <RefreshView
           config={sheetConfig}
           allSheetTables={allSheetTables}
+          exploreDimensions={exploreDetail?.fields.dimensions || []}
           onSelectTable={(tbl) => {
             preferredTableIdRef.current = tbl.tableId || null;
             setSheetConfig(tbl);
           }}
           onAddTableToSheet={handleAddTableToSheet}
-          onRefresh={handleRefreshActive}
+          onApplyDrillPayload={(updatedPayload) => handleRefreshActive(updatedPayload)}
+          onRefresh={() => handleRefreshActive()}
           onCancel={handleCancelQuery}
           onEdit={() => handleEditQuery(sheetConfig)}
           onNewQuery={handleStartNewQuery}
