@@ -1,3 +1,5 @@
+import { QueryPayload } from "./queryTaskRunner";
+
 export interface ExploreSummary {
   name: string;
   label: string;
@@ -24,6 +26,8 @@ export interface FieldDefinition {
   dimension_group?: string | null;
   group_label?: string | null;
   synonyms?: string[];
+  tags?: string[];
+  drill_fields?: string[];
 }
 
 export interface ParameterDefinition {
@@ -55,6 +59,146 @@ export interface ExploreDetail {
     dimensions: FieldDefinition[];
     measures: FieldDefinition[];
     parameters?: ParameterDefinition[];
+  };
+}
+
+export interface LookerWriteQuery {
+  model: string;
+  view: string;
+  fields?: string[] | null;
+  pivots?: string[] | null;
+  filters?: Record<string, string> | null;
+  sorts?: string[] | null;
+  limit?: string | null;
+  total?: boolean | null;
+  row_total?: string | null;
+  subtotals?: string[] | null;
+}
+
+export interface LookSummary {
+  id: string;
+  title: string;
+  description?: string | null;
+  folder?: { id: string; name: string } | null;
+  model?: { id: string; label?: string } | null;
+  updated_at?: string | null;
+}
+
+export interface LookDetail {
+  id: string;
+  title: string;
+  description?: string | null;
+  query?: LookerWriteQuery | null;
+}
+
+export interface DashboardSummary {
+  id: string;
+  title: string;
+  description?: string | null;
+  folder?: { id: string; name: string } | null;
+}
+
+export interface DashboardFilterDef {
+  id?: string;
+  name: string;
+  title: string;
+  type?: string;
+  default_value?: string | null;
+  dimension?: string | null;
+}
+
+export interface DashboardTileListener {
+  dashboard_filter_name: string;
+  field: string;
+}
+
+export interface DashboardElementDef {
+  id: string;
+  title?: string | null;
+  type?: string | null;
+  query?: LookerWriteQuery | null;
+  result_maker?: {
+    query?: LookerWriteQuery | null;
+    filterables?: Array<{ listen?: DashboardTileListener[] | null }> | null;
+  } | null;
+}
+
+export interface DashboardDetail {
+  id: string;
+  title: string;
+  description?: string | null;
+  dashboard_filters?: DashboardFilterDef[];
+  dashboard_elements?: DashboardElementDef[];
+}
+
+/**
+ * Converts a Looker Look or Dashboard Tile `query` object into a normalized QueryPayload.
+ */
+export function convertWriteQueryToPayload(wq: LookerWriteQuery): QueryPayload {
+  return {
+    model: wq.model,
+    view: wq.view,
+    fields: Array.isArray(wq.fields) ? wq.fields : [],
+    filters:
+      wq.filters && Object.keys(wq.filters).length > 0 ? { ...wq.filters } : null,
+    sorts: Array.isArray(wq.sorts) ? wq.sorts : [],
+    limit: wq.limit || "500",
+    pivots: Array.isArray(wq.pivots) && wq.pivots.length > 0 ? wq.pivots : null,
+    total: wq.total ? true : undefined,
+    row_total:
+      wq.row_total === "right" || wq.row_total === "left" ? wq.row_total : undefined,
+    subtotals:
+      Array.isArray(wq.subtotals) && wq.subtotals.length > 0 ? wq.subtotals : null,
+  };
+}
+
+/**
+ * Extracts the query and any dashboard filter `listen` bindings from a DashboardElementDef.
+ */
+export function extractTileQueryAndListeners(el: DashboardElementDef): {
+  query: LookerWriteQuery | null;
+  listeners: DashboardTileListener[];
+} {
+  const query = el.query || el.result_maker?.query || null;
+  const listeners: DashboardTileListener[] = [];
+  const filterables = el.result_maker?.filterables || [];
+  for (const f of filterables) {
+    if (Array.isArray(f.listen)) {
+      for (const l of f.listen) {
+        if (l.dashboard_filter_name && l.field) {
+          listeners.push({
+            dashboard_filter_name: l.dashboard_filter_name,
+            field: l.field,
+          });
+        }
+      }
+    }
+  }
+  return { query, listeners };
+}
+
+/**
+ * Applies active dashboard-level filter values onto a tile's QueryPayload using its `listen` mappings.
+ */
+export function applyDashboardFiltersToTilePayload(
+  basePayload: QueryPayload,
+  listeners: DashboardTileListener[],
+  dashboardFilterValues: Record<string, string>
+): QueryPayload {
+  const mergedFilters: Record<string, string> = {
+    ...(basePayload.filters || {}),
+  };
+
+  for (const listener of listeners) {
+    const val = dashboardFilterValues[listener.dashboard_filter_name];
+    if (val !== undefined && val !== null && String(val).trim() !== "") {
+      mergedFilters[listener.field] = String(val).trim();
+    }
+  }
+
+  return {
+    ...basePayload,
+    filters: Object.keys(mergedFilters).length > 0 ? mergedFilters : null,
   };
 }
 
@@ -129,7 +273,7 @@ export async function getExplore(
   explore: string
 ): Promise<ExploreDetail> {
   const fields =
-    "id,name,label,always_filter,conditionally_filter,fields(dimensions(name,label,label_short,type,value_format,value_format_name,view_label,description,field_group_label,field_group_variant,dimension_group,synonyms),measures(name,label,label_short,type,value_format,value_format_name,view_label,description,field_group_label,field_group_variant,synonyms),parameters(name,label,label_short,view_label,type,default_value,default_filter_value,has_allowed_values,enumerations,synonyms))";
+    "id,name,label,always_filter,conditionally_filter,fields(dimensions(name,label,label_short,type,value_format,value_format_name,view_label,description,field_group_label,field_group_variant,dimension_group,synonyms,tags,drill_fields),measures(name,label,label_short,type,value_format,value_format_name,view_label,description,field_group_label,field_group_variant,synonyms,tags,drill_fields),parameters(name,label,label_short,view_label,type,default_value,default_filter_value,has_allowed_values,enumerations,synonyms))";
   const url = `${baseUrl.replace(/\/$/, "")}/api/4.0/lookml_models/${encodeURIComponent(model)}/explores/${encodeURIComponent(explore)}?fields=${encodeURIComponent(fields)}`;
 
   const res = await fetch(url, {
@@ -143,7 +287,6 @@ export async function getExplore(
   const data: ExploreDetail = await res.json();
   data.always_filter = normalizeAlwaysFilters(data.always_filter as any);
 
-  // Tag categories for easy UI consumption
   if (data.fields?.dimensions) {
     data.fields.dimensions.forEach((d) => (d.category = "dimension"));
   }
@@ -163,7 +306,6 @@ export async function getExplore(
 
 /**
  * Retrieves field suggestions for a specific explore and field.
- * GET /api/4.0/models/{model_name}/views/{view_name}/fields/{field_name}/suggestions
  */
 export async function getFieldSuggestions(
   baseUrl: string,
@@ -197,3 +339,80 @@ export async function getFieldSuggestions(
   }
 }
 
+/**
+ * Fetches all accessible Saved Looks from the Looker instance.
+ */
+export async function getLooks(baseUrl: string, token: string): Promise<LookSummary[]> {
+  const fields = "id,title,description,folder(id,name),model(id,label),updated_at";
+  const url = `${baseUrl.replace(/\/$/, "")}/api/4.0/looks?fields=${encodeURIComponent(fields)}`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to fetch Looks: ${res.statusText}`);
+  }
+  const list = await res.json();
+  return Array.isArray(list)
+    ? list.map((l: any) => ({ ...l, id: String(l.id) }))
+    : [];
+}
+
+/**
+ * Fetches a specific Saved Look including its underlying semantic Query definition.
+ */
+export async function getLook(
+  baseUrl: string,
+  token: string,
+  lookId: string
+): Promise<LookDetail> {
+  const fields =
+    "id,title,description,query(model,view,fields,pivots,filters,sorts,limit,total,row_total,subtotals)";
+  const url = `${baseUrl.replace(/\/$/, "")}/api/4.0/looks/${encodeURIComponent(lookId)}?fields=${encodeURIComponent(fields)}`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to fetch Look ${lookId}: ${res.statusText}`);
+  }
+  const data = await res.json();
+  return { ...data, id: String(data.id) };
+}
+
+/**
+ * Fetches all accessible Dashboards from the Looker instance.
+ */
+export async function getDashboards(baseUrl: string, token: string): Promise<DashboardSummary[]> {
+  const fields = "id,title,description,folder(id,name)";
+  const url = `${baseUrl.replace(/\/$/, "")}/api/4.0/dashboards?fields=${encodeURIComponent(fields)}`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to fetch Dashboards: ${res.statusText}`);
+  }
+  const list = await res.json();
+  return Array.isArray(list)
+    ? list.map((d: any) => ({ ...d, id: String(d.id) }))
+    : [];
+}
+
+/**
+ * Fetches a specific Dashboard including its dashboard_filters and dashboard_elements (tiles + queries + listeners).
+ */
+export async function getDashboard(
+  baseUrl: string,
+  token: string,
+  dashboardId: string
+): Promise<DashboardDetail> {
+  const fields =
+    "id,title,description,dashboard_filters(id,name,title,type,default_value,dimension),dashboard_elements(id,title,type,query(model,view,fields,pivots,filters,sorts,limit,total,row_total,subtotals),result_maker(query(model,view,fields,pivots,filters,sorts,limit,total,row_total,subtotals),filterables(listen)))";
+  const url = `${baseUrl.replace(/\/$/, "")}/api/4.0/dashboards/${encodeURIComponent(dashboardId)}?fields=${encodeURIComponent(fields)}`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to fetch Dashboard ${dashboardId}: ${res.statusText}`);
+  }
+  const data = await res.json();
+  return { ...data, id: String(data.id) };
+}

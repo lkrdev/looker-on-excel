@@ -9,9 +9,14 @@ import {
   ArrowSyncRegular,
   SignOutRegular,
   CheckmarkCircleFilled,
+  DatabaseSearchRegular,
+  BookmarkRegular,
+  BoardRegular,
 } from "@fluentui/react-icons";
 import { LookerIcon, LookerAccentBar } from "./LookerLogo";
 import { lookerColors } from "../theme/lookerTheme";
+
+export type NavigationMode = "explore" | "looks" | "dashboards";
 
 const useStyles = makeStyles({
   container: {
@@ -22,7 +27,7 @@ const useStyles = makeStyles({
   content: {
     display: "flex",
     flexDirection: "column",
-    padding: "10px 16px 10px 16px",
+    padding: "10px 16px 8px 16px",
     gap: "8px",
   },
   topRow: {
@@ -74,10 +79,17 @@ const useStyles = makeStyles({
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
   },
-  actions: {
-    display: "flex",
-    alignItems: "center",
+  navBar: {
+    display: "grid",
+    gridTemplateColumns: "1fr 1fr 1fr",
     gap: "4px",
+    padding: "3px",
+    backgroundColor: tokens.colorNeutralBackground3,
+    borderRadius: "6px",
+  },
+  navBtn: {
+    fontSize: "12px",
+    fontWeight: 600,
   },
 });
 
@@ -88,6 +100,8 @@ interface HeaderProps {
   onDisconnect?: () => void;
   onRefreshAll?: () => void;
   refreshingAll?: boolean;
+  activeMode?: NavigationMode;
+  onModeChange?: (mode: NavigationMode) => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -97,6 +111,8 @@ export const Header: React.FC<HeaderProps> = ({
   onDisconnect,
   onRefreshAll,
   refreshingAll,
+  activeMode = "explore",
+  onModeChange,
 }) => {
   const styles = useStyles();
 
@@ -145,6 +161,38 @@ export const Header: React.FC<HeaderProps> = ({
                 title="Disconnect Looker instance"
               />
             )}
+          </div>
+        )}
+
+        {isConnected && onModeChange && (
+          <div className={styles.navBar} role="tablist" aria-label="Looker Mode Navigation">
+            <Button
+              size="small"
+              appearance={activeMode === "explore" ? "primary" : "subtle"}
+              icon={<DatabaseSearchRegular />}
+              onClick={() => onModeChange("explore")}
+              className={styles.navBtn}
+            >
+              Explore
+            </Button>
+            <Button
+              size="small"
+              appearance={activeMode === "looks" ? "primary" : "subtle"}
+              icon={<BookmarkRegular />}
+              onClick={() => onModeChange("looks")}
+              className={styles.navBtn}
+            >
+              Looks
+            </Button>
+            <Button
+              size="small"
+              appearance={activeMode === "dashboards" ? "primary" : "subtle"}
+              icon={<BoardRegular />}
+              onClick={() => onModeChange("dashboards")}
+              className={styles.navBtn}
+            >
+              Dashboards
+            </Button>
           </div>
         )}
       </div>
