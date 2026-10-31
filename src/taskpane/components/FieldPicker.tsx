@@ -121,6 +121,7 @@ interface FieldPickerProps {
   onToggleSort?: (fieldName: string) => void;
   pivots?: string[];
   onTogglePivot?: (fieldName: string) => void;
+  onSetPivots?: (newPivots: string[]) => void;
   onReorderFields?: (newFields: string[]) => void;
 }
 
@@ -193,6 +194,7 @@ export const FieldPicker: React.FC<FieldPickerProps> = ({
   onToggleSort,
   pivots = [],
   onTogglePivot,
+  onSetPivots,
   onReorderFields,
 }) => {
   const styles = useStyles();
@@ -582,6 +584,48 @@ export const FieldPicker: React.FC<FieldPickerProps> = ({
               );
             })}
           </div>
+
+          {pivots.length > 0 && (
+            <div
+              style={{
+                marginTop: "6px",
+                padding: "6px 8px",
+                backgroundColor: tokens.colorBrandBackground2,
+                borderRadius: "6px",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: "8px",
+              }}
+            >
+              <Caption1 style={{ fontSize: "11px" }}>
+                <strong>Crosstab Active:</strong> {pivots.length} column pivot
+                {pivots.length > 1 ? "s" : ""} (
+                {pivots
+                  .map((p) => allFields.find((f) => f.name === p)?.label_short || p)
+                  .join(" → ")}
+                )
+              </Caption1>
+              {onSetPivots && (
+                <Button
+                  size="small"
+                  appearance="outline"
+                  title="Swap row dimensions and column pivot dimensions"
+                  onClick={() => {
+                    const selectedDims = selectedFields.filter(
+                      (fk) => allFields.find((f) => f.name === fk)?.category === "dimension"
+                    );
+                    const rowDims = selectedDims.filter((d) => !pivots.includes(d));
+                    if (rowDims.length > 0) {
+                      onSetPivots(rowDims);
+                    }
+                  }}
+                >
+                  ⇄ Swap Rows &amp; Columns
+                </Button>
+              )}
+            </div>
+          )}
         </div>
       )}
 

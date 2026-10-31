@@ -578,7 +578,9 @@ export const App: React.FC = () => {
         columns,
         dataRows,
         pivots.length > 0 ? pivots : undefined,
-        Boolean(tableOptions.includeRowTotals && pivots.length > 0)
+        Boolean(tableOptions.includeRowTotals && pivots.length > 0),
+        bundle.pivotsMeta,
+        tableOptions.pivotGroupMode || "measure_first"
       ).expandedColumns.length;
 
       const targetSheetId =
@@ -603,6 +605,7 @@ export const App: React.FC = () => {
         targetSheetId,
         sheetName: exploreDetail.label || selectedExplore || "Looker Data",
         pivots: pivots.length > 0 ? pivots : undefined,
+        pivotsMeta: bundle.pivotsMeta,
         prevRowCount: destination === "active" ? sheetConfig?.rowCount : undefined,
         prevColCount:
           destination === "active"
@@ -731,7 +734,9 @@ export const App: React.FC = () => {
         activeColumns,
         dataRows,
         activePivots,
-        Boolean(effectivePayload.row_total)
+        Boolean(effectivePayload.row_total),
+        bundle.pivotsMeta,
+        sheetConfig.options?.pivotGroupMode || "measure_first"
       ).expandedColumns.length;
 
       const effectiveAnchor = (
@@ -759,6 +764,7 @@ export const App: React.FC = () => {
           destination: "active",
           targetSheetId: sourceSheetId || undefined,
           pivots: activePivots,
+          pivotsMeta: bundle.pivotsMeta,
           prevRowCount: sheetConfig.rowCount,
           prevColCount: sheetConfig.options?.prevColCount ?? sheetConfig.columns.length,
           totalsData: bundle.totalsData,
@@ -830,7 +836,9 @@ export const App: React.FC = () => {
           s.config.columns,
           dataRows,
           sPivots,
-          Boolean(s.config.queryPayload.row_total)
+          Boolean(s.config.queryPayload.row_total),
+          bundle.pivotsMeta,
+          s.config.options?.pivotGroupMode || "measure_first"
         ).expandedColumns.length;
 
         const effectiveAnchor = (
@@ -857,6 +865,7 @@ export const App: React.FC = () => {
             destination: "active",
             targetSheetId: s.sheetId,
             pivots: sPivots,
+            pivotsMeta: bundle.pivotsMeta,
             prevRowCount: s.config.rowCount,
             prevColCount: s.config.options?.prevColCount ?? s.config.columns.length,
             totalsData: bundle.totalsData,
@@ -1000,7 +1009,9 @@ export const App: React.FC = () => {
         columns,
         dataRows,
         payload.pivots || undefined,
-        Boolean(payload.row_total)
+        Boolean(payload.row_total),
+        bundle.pivotsMeta,
+        tableOptions.pivotGroupMode || "measure_first"
       ).expandedColumns.length;
 
       const effectiveDest = forceNewSheet ? "new" : destination;
@@ -1023,6 +1034,7 @@ export const App: React.FC = () => {
         destination: effectiveDest,
         sheetName: sheetTitle,
         pivots: payload.pivots || undefined,
+        pivotsMeta: bundle.pivotsMeta,
         includeTotals: Boolean(payload.total),
         includeRowTotals: Boolean(payload.row_total),
         includeSubtotals: Boolean(payload.subtotals && payload.subtotals.length > 0),
@@ -1217,6 +1229,7 @@ export const App: React.FC = () => {
                   onToggleSort={handleToggleSort}
                   pivots={pivots}
                   onTogglePivot={handleTogglePivot}
+                  onSetPivots={setPivots}
                   onReorderFields={setSelectedFields}
                 />
 

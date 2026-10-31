@@ -16,7 +16,7 @@ import {
   AccordionPanel,
 } from "@fluentui/react-components";
 import { TableSettingsRegular, TargetRegular } from "@fluentui/react-icons";
-import { WriteOptions } from "../services/excelWriter";
+import { WriteOptions, PivotGroupMode } from "../services/excelWriter";
 import { getActiveCellAddress } from "../services/sheetMetadata";
 
 const useStyles = makeStyles({
@@ -246,6 +246,43 @@ export const TableSettings: React.FC<TableSettingsProps> = ({
                       <span style={{ fontSize: "12px", fontWeight: 600 }}>Include Dimension Subtotals</span>
                       <Caption1 style={{ color: tokens.colorNeutralForeground3, display: "block" }}>
                         Computes Looker SQL subtotals with collapsible Excel row groups.
+                      </Caption1>
+                    </div>
+                  }
+                />
+              </div>
+
+              {/* Crosstab & Multi-Pivot Layout */}
+              <div className={styles.row}>
+                <Label size="small" weight="semibold">
+                  Crosstab &amp; Pivot Layout
+                </Label>
+                <Select
+                  size="small"
+                  value={options.pivotGroupMode || "measure_first"}
+                  onChange={(_, data) =>
+                    onOptionsChange({ pivotGroupMode: data.value as PivotGroupMode })
+                  }
+                >
+                  <option value="measure_first">
+                    Group by Measure (Revenue [2024, 2025], Margin [2024, 2025])
+                  </option>
+                  <option value="cohort_first">
+                    Group by Pivot Cohort (2024 [Revenue, Margin], 2025 [Revenue, Margin])
+                  </option>
+                </Select>
+                <Checkbox
+                  checked={options.useMultiRowCrosstabHeader ?? false}
+                  onChange={(_, data) =>
+                    onOptionsChange({ useMultiRowCrosstabHeader: !!data.checked })
+                  }
+                  label={
+                    <div>
+                      <span style={{ fontSize: "12px", fontWeight: 600 }}>
+                        Multi-Row Merged Crosstab Header
+                      </span>
+                      <Caption1 style={{ color: tokens.colorNeutralForeground3, display: "block" }}>
+                        Renders stacked pivot cohort rows with merged header cells above measure names.
                       </Caption1>
                     </div>
                   }
