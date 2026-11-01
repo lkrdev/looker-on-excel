@@ -10,7 +10,8 @@ import {
   ProgressBar,
   Divider,
   Badge,
-  Input,
+  Select,
+  Switch,
 } from "@fluentui/react-components";
 import {
   ArrowSyncRegular,
@@ -25,12 +26,12 @@ import { lookerColors } from "../theme/lookerTheme";
 import { StoredSheetConfig } from "../services/sheetMetadata";
 import { FieldDefinition } from "../services/lookerClient";
 import { QueryPayload } from "../services/queryTaskRunner";
+import { RowGroupDisplayLevel, WriteOptions } from "../services/excelWriter";
 import {
   resolveExploreHierarchies,
   getFieldHierarchyContext,
   expandFieldInSelection,
   collapseFieldInSelection,
-  buildRowDrillQueryPayload,
 } from "../services/hierarchyResolver";
 
 const useStyles = makeStyles({
@@ -82,7 +83,8 @@ interface RefreshViewProps {
   exploreDimensions?: FieldDefinition[];
   onSelectTable?: (tableConfig: StoredSheetConfig) => void;
   onAddTableToSheet?: () => void;
-  onApplyDrillPayload?: (updatedPayload: QueryPayload) => void;
+  onApplyDrillPayload?: (updatedPayload: QueryPayload, updatedOptions?: Partial<WriteOptions>) => void;
+  onChangeDisplayLevel?: (displayLevel: RowGroupDisplayLevel) => void;
   onRefresh: () => void;
   onCancel?: () => void;
   onEdit: () => void;
@@ -99,6 +101,7 @@ export const RefreshView: React.FC<RefreshViewProps> = ({
   onSelectTable,
   onAddTableToSheet,
   onApplyDrillPayload,
+  onChangeDisplayLevel,
   onRefresh,
   onCancel,
   onEdit,
@@ -108,7 +111,6 @@ export const RefreshView: React.FC<RefreshViewProps> = ({
   progressPercent,
 }) => {
   const styles = useStyles();
-  const [drillFilterValue, setDrillFilterValue] = React.useState("");
 
   const formattedDate = config.lastRefreshed
     ? new Date(config.lastRefreshed).toLocaleString()
@@ -128,13 +130,15 @@ export const RefreshView: React.FC<RefreshViewProps> = ({
   }, [exploreDimensions]);
 
   const activeTableFields = config.queryPayload.fields || [];
-  const hierarchicalFields = activeTableFields
-    .map((fName) => ({
-      fieldName: fName,
-      label: dimByName.get(fName)?.label_short || dimByName.get(fName)?.label || fName,
-      ctx: getFieldHierarchyContext(fName, hierarchyLadders),
-    }))
-    .filter((item) => item.ctx !== null);
+  const activePivots = config.queryPayload.pivots || [];
+  const nonPivotDims = activeTableFields.filter((fName) => {
+    const col = config.columns.find((c) => c.fieldKey === fName);
+    const isDim = (col?.category || (dimByName.has(fName) ? "dimension" : "measure")) === "dimension";
+    return isDim && !activePivots.includes(fName);
+  });
+  const isRowGroupsEnabled = Boolean(config.options?.enableRowGroups && nonPivotDims.length >= 2);
+  const deepestDim = nonPivotDims.length > 0 ? nonPivotDims[nonPivotDims.length - 1] : null;
+  const deepestCtx = deepestDim ? getFieldHierarchyContext(deepestDim, hierarchyLadders) : null;
 
   return (
     <div className={styles.container}>
@@ -209,101 +213,133 @@ export const RefreshView: React.FC<RefreshViewProps> = ({
         </div>
       </Card>
 
-      {hierarchicalFields.length > 0 && onApplyDrillPayload && (
+      {(nonPivotDims.length >= 2 || deepestCtx) && onApplyDrillPayload && (
         <Card className={styles.card}>
           <div style={{ padding: "10px 12px", display: "flex", flexDirection: "column", gap: "8px" }}>
-            <Caption1 style={{ fontWeight: 600 }}>Hierarchy Expand / Collapse & Drill</Caption1>
-            <Input
-              size="small"
-              placeholder="Optional: Filter value for row drill (e.g. 2025)"
-              value={drillFilterValue}
-              onChange={(_, d) => setDrillFilterValue(d.value)}
-            />
-            {hierarchicalFields.map(({ fieldName, label, ctx }) => {
-              if (!ctx) return null;
-              const childField = ctx.childField;
-              const childLabel = childField
-                ? dimByName.get(childField)?.label_short ||
-                  dimByName.get(childField)?.label ||
-                  childField
-                : null;
-              const canExpand = Boolean(childField && !activeTableFields.includes(childField));
-              const hasExpandedDescendant = ctx.ladder.levels
-                .slice(ctx.levelIndex + 1)
-                .some((lv) => activeTableFields.includes(lv));
-              const canCollapse = hasExpandedDescendant || Boolean(ctx.parentField);
-
-              return (
-                <div
-                  key={fieldName}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    gap: "6px",
-                    fontSize: "12px",
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div style={{ display: "flex", flexDirection: "column" }}>
+                <Caption1 style={{ fontWeight: 600 }}>Row Groups / Hierarchy Tree</Caption1>
+                <Caption1 style={{ color: tokens.colorNeutralForeground3, fontSize: "11px" }}>
+                  {nonPivotDims
+                    .map((d) => dimByName.get(d)?.label_short || dimByName.get(d)?.label || d)
+                    .join(" ▸ ")}
+                </Caption1>
+              </div>
+              {nonPivotDims.length >= 2 && (
+                <Switch
+                  checked={isRowGroupsEnabled}
+                  disabled={isRefreshing}
+                  onChange={(_, data) => {
+                    onApplyDrillPayload(config.queryPayload, {
+                      enableRowGroups: data.checked,
+                      includeSubtotals: data.checked ? true : config.options?.includeSubtotals,
+                      rowGroupFields: nonPivotDims,
+                      showGroupCounts: config.options?.showGroupCounts ?? true,
+                      showGroupSubtotals: config.options?.showGroupSubtotals ?? true,
+                      defaultDisplayLevel: config.options?.defaultDisplayLevel || "all_expanded",
+                    });
                   }}
-                >
-                  <span style={{ fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis" }}>
-                    {label}
-                  </span>
-                  <div style={{ display: "flex", gap: "4px", flexShrink: 0 }}>
-                    {canExpand && childField && (
-                      <Button
-                        size="small"
-                        appearance="outline"
-                        disabled={isRefreshing}
-                        onClick={() => {
-                          if (drillFilterValue.trim()) {
-                            const nextPayload = buildRowDrillQueryPayload(
-                              config.queryPayload,
-                              fieldName,
-                              drillFilterValue.trim(),
-                              childField,
-                              true
-                            );
-                            onApplyDrillPayload(nextPayload);
-                          } else {
-                            const { fields } = expandFieldInSelection(
-                              activeTableFields,
-                              fieldName,
-                              hierarchyLadders,
-                              "insert_child"
-                            );
-                            onApplyDrillPayload({
-                              ...config.queryPayload,
-                              fields,
-                            });
-                          }
-                        }}
-                      >
-                        + {childLabel}
-                      </Button>
-                    )}
-                    {canCollapse && (
-                      <Button
-                        size="small"
-                        appearance="subtle"
-                        disabled={isRefreshing}
-                        onClick={() => {
-                          const { fields } = collapseFieldInSelection(
-                            activeTableFields,
-                            fieldName,
-                            hierarchyLadders
-                          );
-                          onApplyDrillPayload({
-                            ...config.queryPayload,
-                            fields,
-                          });
-                        }}
-                      >
-                        - Collapse
-                      </Button>
-                    )}
-                  </div>
+                />
+              )}
+            </div>
+
+            {isRowGroupsEnabled && (
+              <>
+                <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                  <Caption1 style={{ fontWeight: 600, fontSize: "11px" }}>
+                    Display Level (In-Sheet Expand / Collapse)
+                  </Caption1>
+                  <Select
+                    size="small"
+                    value={config.options?.defaultDisplayLevel || "all_expanded"}
+                    onChange={(_, data) => {
+                      const nextLevel = data.value as RowGroupDisplayLevel;
+                      if (onChangeDisplayLevel) {
+                        onChangeDisplayLevel(nextLevel);
+                      }
+                    }}
+                  >
+                    <option value="all_collapsed">All Collapsed</option>
+                    <option value="level_1">Level 1</option>
+                    <option value="level_2">Level 2</option>
+                    <option value="level_3">Level 3</option>
+                    <option value="all_expanded">All Expanded</option>
+                  </Select>
                 </div>
-              );
-            })}
+                <Caption1 style={{ color: tokens.colorNeutralForeground3, fontSize: "11px" }}>
+                  Tip: Click any <strong>▸</strong> or <strong>▾</strong> group cell in the{" "}
+                  <strong>{config.options?.groupColumnHeader || "Group"}</strong> column on the
+                  worksheet to expand or collapse that branch in-place.
+                </Caption1>
+              </>
+            )}
+
+            {/* Add / Remove Hierarchy Level Buttons */}
+            {deepestCtx && (
+              <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", paddingTop: "2px" }}>
+                {deepestCtx.childField && !activeTableFields.includes(deepestCtx.childField) && (
+                  <Button
+                    size="small"
+                    appearance="outline"
+                    disabled={isRefreshing}
+                    onClick={() => {
+                      const { fields } = expandFieldInSelection(
+                        activeTableFields,
+                        deepestDim!,
+                        hierarchyLadders,
+                        "insert_child"
+                      );
+                      onApplyDrillPayload(
+                        {
+                          ...config.queryPayload,
+                          fields,
+                        },
+                        {
+                          enableRowGroups: true,
+                          includeSubtotals: true,
+                          rowGroupFields: [...nonPivotDims, deepestCtx.childField!],
+                        }
+                      );
+                    }}
+                  >
+                    + Add Level:{" "}
+                    {dimByName.get(deepestCtx.childField)?.label_short ||
+                      dimByName.get(deepestCtx.childField)?.label ||
+                      deepestCtx.childField}
+                  </Button>
+                )}
+                {nonPivotDims.length >= 2 && deepestCtx.parentField && (
+                  <Button
+                    size="small"
+                    appearance="subtle"
+                    disabled={isRefreshing}
+                    onClick={() => {
+                      const { fields } = collapseFieldInSelection(
+                        activeTableFields,
+                        deepestCtx.parentField!,
+                        hierarchyLadders
+                      );
+                      const nextGroupFields = nonPivotDims.slice(0, -1);
+                      onApplyDrillPayload(
+                        {
+                          ...config.queryPayload,
+                          fields,
+                        },
+                        {
+                          enableRowGroups: nextGroupFields.length >= 2,
+                          rowGroupFields: nextGroupFields,
+                        }
+                      );
+                    }}
+                  >
+                    - Remove Level:{" "}
+                    {dimByName.get(deepestDim!)?.label_short ||
+                      dimByName.get(deepestDim!)?.label ||
+                      deepestDim}
+                  </Button>
+                )}
+              </div>
+            )}
           </div>
         </Card>
       )}

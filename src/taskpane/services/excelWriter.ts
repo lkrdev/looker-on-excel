@@ -16,6 +16,24 @@ export interface BoundingBox {
   right: number;
 }
 
+export type RowGroupDisplayLevel =
+  | "all_expanded"
+  | "all_collapsed"
+  | "level_1"
+  | "level_2"
+  | "level_3";
+
+export interface HierarchyTreeNodeMeta {
+  rowOffset: number;
+  level: number;
+  label: string;
+  childCount: number;
+  descendantStartOffset: number;
+  descendantEndOffset: number;
+  directChildOffsets: number[];
+  isExpanded: boolean;
+}
+
 export interface WriteOptions {
   useExcelTable?: boolean;
   tableStyle?: string;
@@ -38,6 +56,14 @@ export interface WriteOptions {
   anchorCell?: string;
   tableId?: string;
   siblingTableRanges?: BoundingBox[];
+  enableRowGroups?: boolean;
+  rowGroupFields?: string[];
+  defaultDisplayLevel?: RowGroupDisplayLevel;
+  groupColumnHeader?: string;
+  showGroupCounts?: boolean;
+  showGroupSubtotals?: boolean;
+  treeNodes?: HierarchyTreeNodeMeta[];
+  rowLevels?: number[];
 }
 
 /**
@@ -324,19 +350,341 @@ export interface WorksheetRowMatrixResult {
   subtotalRowIndices: number[];
   grandTotalRowIndex: number | null;
   outlineGroups: Array<{ startRowOffset: number; endRowOffset: number }>;
+  treeNodes?: HierarchyTreeNodeMeta[];
+  rowLevels?: number[];
+}
+
+export function getMaxVisibleLevel(displayLevel?: RowGroupDisplayLevel): number {
+  switch (displayLevel) {
+    case "all_collapsed":
+      return 0;
+    case "level_1":
+      return 1;
+    case "level_2":
+      return 2;
+    case "level_3":
+      return 3;
+    case "all_expanded":
+    default:
+      return 999;
+  }
+}
+
+export function formatTreeGroupCellLabel(
+  rawLabel: string,
+  level: number,
+  isParent: boolean,
+  isExpanded: boolean,
+  childCount: number,
+  showGroupCounts: boolean = true
+): string {
+  const indent = "    ".repeat(Math.max(0, level));
+  if (isParent) {
+    const caret = isExpanded ? "▾ " : "▸ ";
+    const countSuffix = showGroupCounts ? ` (${childCount})` : "";
+    return `${indent}${caret}${rawLabel}${countSuffix}`;
+  }
+  return `${indent}  ${rawLabel}`;
+}
+
+export function resolveRowGroupFieldKeys(
+  columns: ColumnDefinition[],
+  options?: WriteOptions
+): string[] {
+  const pivotSet = new Set<string>(options?.pivots || []);
+  const nonPivotDimKeys = columns
+    .filter((c) => !pivotSet.has(c.fieldKey) && c.category !== "measure" && !c.isRowTotal)
+    .map((c) => c.fieldKey);
+
+  if (options?.rowGroupFields && options.rowGroupFields.length >= 2) {
+    const matched = options.rowGroupFields.filter((f) => nonPivotDimKeys.includes(f));
+    if (matched.length >= 2) {
+      return matched;
+    }
+  }
+  return nonPivotDimKeys;
 }
 
 /**
- * Interleaves Looker-computed `subtotalsData` rows at dimension group breaks and appends
- * the Looker-computed `totalsData` Grand Total row at the bottom.
+ * When `enableRowGroups` is enabled across >= 2 non-pivoted dimensions, collapses all
+ * grouped dimensions into a single leading `Group` column (`__row_group__`), matching
+ * Looker Explore's "Row Groups" and SAP Analysis for Office Compact Hierarchy display.
+ */
+export function resolveEffectiveColumnsForWrite(
+  columns: ColumnDefinition[],
+  options?: WriteOptions
+): ColumnDefinition[] {
+  if (!options?.enableRowGroups) {
+    return columns;
+  }
+  const groupKeys = resolveRowGroupFieldKeys(columns, options);
+  if (groupKeys.length < 2) {
+    return columns;
+  }
+  const groupKeySet = new Set<string>(groupKeys);
+  const groupHeader = options.groupColumnHeader?.trim() || "Group";
+  const result: ColumnDefinition[] = [
+    {
+      fieldKey: "__row_group__",
+      label: groupHeader,
+      type: "string",
+      category: "dimension",
+    },
+  ];
+  for (const col of columns) {
+    if (!groupKeySet.has(col.fieldKey)) {
+      result.push(col);
+    }
+  }
+  return result;
+}
+
+/**
+ * Computes per-row hidden flags (`true` = hidden, `false` = visible) for a Row Groups
+ * hierarchy tree based on the current `isExpanded` state of each parent in `treeNodes`.
+ * A row `r` is visible iff every ancestor parent node covering `r` has `isExpanded === true`.
+ */
+export function computeTreeRowHiddenFlags(
+  totalRows: number,
+  treeNodes: HierarchyTreeNodeMeta[],
+  grandTotalRowIndex: number | null = null
+): boolean[] {
+  const hidden = new Array<boolean>(totalRows).fill(false);
+  for (const node of treeNodes) {
+    if (!node.isExpanded) {
+      for (
+        let r = node.descendantStartOffset;
+        r <= Math.min(totalRows - 1, node.descendantEndOffset);
+        r++
+      ) {
+        if (r !== grandTotalRowIndex) {
+          hidden[r] = true;
+        }
+      }
+    }
+  }
+  return hidden;
+}
+
+function normalizeDimVal(v: any): string {
+  if (v === null || v === undefined || v === "") return "__NULL__";
+  return String(v);
+}
+
+function buildRowGroupsTreeMatrix(
+  columns: ColumnDefinition[],
+  dataRows: Record<string, any>[],
+  subtotalsData?: Record<string, Record<string, any>[]> | null,
+  totalsData?: Record<string, any> | null,
+  options?: WriteOptions
+): WorksheetRowMatrixResult {
+  const groupFieldKeys = resolveRowGroupFieldKeys(columns, options);
+  const K = groupFieldKeys.length;
+  const maxVisibleLevel = getMaxVisibleLevel(options?.defaultDisplayLevel);
+  const showCounts = options?.showGroupCounts !== false;
+  const showSubtotals = options?.showGroupSubtotals !== false;
+
+  const allSubtotalRows: Record<string, any>[] = subtotalsData
+    ? Object.values(subtotalsData).flat()
+    : [];
+  const usesSentinel = allSubtotalRows.some((sr) =>
+    groupFieldKeys.some((gk) => sr[gk] === "$$$_subtotal_$$$")
+  );
+
+  const outRows: Record<string, any>[] = [];
+  const subtotalRowIndices: number[] = [];
+  const outlineGroups: Array<{ startRowOffset: number; endRowOffset: number }> = [];
+  const treeNodes: HierarchyTreeNodeMeta[] = [];
+  const rowLevels: number[] = [];
+
+  const findMatchingSubtotal = (
+    level: number,
+    pathVals: any[]
+  ): Record<string, any> | undefined => {
+    if (!showSubtotals || allSubtotalRows.length === 0) return undefined;
+    return allSubtotalRows.find((sr) => {
+      for (let j = 0; j <= level; j++) {
+        const gk = groupFieldKeys[j];
+        if (sr[gk] === "$$$_subtotal_$$$") return false;
+        if (normalizeDimVal(sr[gk]) !== normalizeDimVal(pathVals[j])) return false;
+      }
+      for (let j = level + 1; j < K; j++) {
+        const gk = groupFieldKeys[j];
+        if (usesSentinel) {
+          if (sr[gk] !== "$$$_subtotal_$$$") return false;
+        } else {
+          if (sr[gk] !== "$$$_subtotal_$$$" && sr[gk] !== null && sr[gk] !== undefined) {
+            return false;
+          }
+        }
+      }
+      return true;
+    });
+  };
+
+  const emitLevel = (level: number, subsetRows: Record<string, any>[], pathVals: any[]): number[] => {
+    const dimKey = groupFieldKeys[level];
+    const groups: Array<{ rawVal: any; rows: Record<string, any>[] }> = [];
+    const groupMap = new Map<string, { rawVal: any; rows: Record<string, any>[] }>();
+
+    for (const r of subsetRows) {
+      const val = r[dimKey];
+      const normKey = normalizeDimVal(val);
+      let entry = groupMap.get(normKey);
+      if (!entry) {
+        entry = { rawVal: val, rows: [] };
+        groupMap.set(normKey, entry);
+        groups.push(entry);
+      }
+      entry.rows.push(r);
+    }
+
+    const levelNodeOffsets: number[] = [];
+
+    for (const grp of groups) {
+      const currentPath = [...pathVals, grp.rawVal];
+      const displayVal =
+        grp.rawVal === null || grp.rawVal === undefined || grp.rawVal === ""
+          ? "∅"
+          : String(grp.rawVal);
+
+      // Compute direct child count (distinct values at level + 1, or leaf row count if level + 1 === K - 1)
+      let directChildCount = grp.rows.length;
+      if (level + 1 < K - 1) {
+        const nextDimKey = groupFieldKeys[level + 1];
+        const distinctNext = new Set(grp.rows.map((r) => normalizeDimVal(r[nextDimKey])));
+        directChildCount = distinctNext.size;
+      }
+
+      const isExpanded = level < maxVisibleLevel;
+      const matchingSub = findMatchingSubtotal(level, currentPath);
+      const parentRow: Record<string, any> = matchingSub ? { ...matchingSub } : {};
+      parentRow.__row_group__ = formatTreeGroupCellLabel(
+        displayVal,
+        level,
+        true,
+        isExpanded,
+        directChildCount,
+        showCounts
+      );
+
+      const parentRowOffset = outRows.length;
+      outRows.push(parentRow);
+      subtotalRowIndices.push(parentRowOffset);
+      rowLevels.push(level);
+      levelNodeOffsets.push(parentRowOffset);
+
+      const nodeMeta: HierarchyTreeNodeMeta = {
+        rowOffset: parentRowOffset,
+        level,
+        label: displayVal,
+        childCount: directChildCount,
+        descendantStartOffset: parentRowOffset + 1,
+        descendantEndOffset: parentRowOffset + 1,
+        directChildOffsets: [],
+        isExpanded,
+      };
+      treeNodes.push(nodeMeta);
+
+      if (level + 1 < K - 1) {
+        nodeMeta.directChildOffsets = emitLevel(level + 1, grp.rows, currentPath);
+      } else {
+        const leafKey = groupFieldKeys[K - 1];
+        const leafOffsets: number[] = [];
+        for (const leaf of grp.rows) {
+          const leafRaw = leaf[leafKey];
+          const leafDisplay =
+            leafRaw === null || leafRaw === undefined || leafRaw === ""
+              ? "∅"
+              : String(leafRaw);
+          const formattedLeaf: Record<string, any> = {
+            ...leaf,
+            __row_group__: formatTreeGroupCellLabel(
+              leafDisplay,
+              K - 1,
+              false,
+              false,
+              0,
+              showCounts
+            ),
+          };
+          const leafOffset = outRows.length;
+          outRows.push(formattedLeaf);
+          rowLevels.push(K - 1);
+          leafOffsets.push(leafOffset);
+        }
+        nodeMeta.directChildOffsets = leafOffsets;
+      }
+
+      nodeMeta.descendantEndOffset = outRows.length - 1;
+      if (level === 0 && nodeMeta.descendantEndOffset >= nodeMeta.descendantStartOffset) {
+        outlineGroups.push({
+          startRowOffset: nodeMeta.descendantStartOffset,
+          endRowOffset: nodeMeta.descendantEndOffset,
+        });
+      }
+    }
+
+    return levelNodeOffsets;
+  };
+
+  if (dataRows.length > 0 && K >= 2) {
+    emitLevel(0, dataRows, []);
+  }
+
+  let grandTotalRowIndex: number | null = null;
+  if (totalsData && Object.keys(totalsData).length > 0) {
+    const grandTotalRow: Record<string, any> = {
+      ...totalsData,
+      __row_group__: "Grand Total",
+    };
+    outRows.push(grandTotalRow);
+    rowLevels.push(0);
+    grandTotalRowIndex = outRows.length - 1;
+  }
+
+  return {
+    rows: outRows,
+    subtotalRowIndices,
+    grandTotalRowIndex,
+    outlineGroups,
+    treeNodes,
+    rowLevels,
+  };
+}
+
+/**
+ * Interleaves Looker-computed `subtotalsData` rows at dimension group breaks (or builds a
+ * single-column indented Row Groups hierarchy tree when `options.enableRowGroups` is enabled)
+ * and appends the Looker-computed `totalsData` Grand Total row at the bottom.
  */
 export function buildWorksheetRowMatrix(
   columns: ColumnDefinition[],
   dataRows: Record<string, any>[],
   subtotalsData?: Record<string, Record<string, any>[]> | null,
   totalsData?: Record<string, any> | null,
-  pivots?: string[]
+  pivots?: string[],
+  options?: WriteOptions
 ): WorksheetRowMatrixResult {
+  const effectiveOpts: WriteOptions | undefined = options
+    ? { ...options, pivots: options.pivots || pivots }
+    : pivots
+    ? { pivots }
+    : undefined;
+
+  if (effectiveOpts?.enableRowGroups) {
+    const groupFieldKeys = resolveRowGroupFieldKeys(columns, effectiveOpts);
+    if (groupFieldKeys.length >= 2) {
+      return buildRowGroupsTreeMatrix(
+        columns,
+        dataRows,
+        subtotalsData,
+        totalsData,
+        effectiveOpts
+      );
+    }
+  }
+
   const pivotSet = new Set<string>(pivots || []);
   const nonPivotDims = columns.filter(
     (c) => !pivotSet.has(c.fieldKey) && c.category !== "measure" && !c.isRowTotal
@@ -476,11 +824,19 @@ export async function writeLookerDataToWorksheet(
     dataRows,
     options.subtotalsData,
     options.totalsData,
-    options.pivots
+    options.pivots,
+    options
   );
+  if (matrix.treeNodes) {
+    options.treeNodes = matrix.treeNodes;
+  }
+  if (matrix.rowLevels) {
+    options.rowLevels = matrix.rowLevels;
+  }
   const effectiveRows = matrix.rows;
+  const baseColumns = resolveEffectiveColumnsForWrite(columns, options);
   const { expandedColumns, getValue } = expandPivotedColumns(
-    columns,
+    baseColumns,
     effectiveRows,
     options.pivots,
     options.includeRowTotals,
@@ -574,6 +930,7 @@ export async function writeLookerDataToWorksheet(
             prevTotalRows,
             Math.max(1, prevTotalCols)
           );
+          prevDataRng.rowHidden = false;
           prevDataRng.ungroup(Excel.GroupOption.byRows);
           await context.sync();
         } catch {
@@ -984,13 +1341,26 @@ export async function writeLookerDataToWorksheet(
         }
 
         if (hasSubtotals) {
+          const nodeByOffset = new Map<number, HierarchyTreeNodeMeta>();
+          if (matrix.treeNodes) {
+            matrix.treeNodes.forEach((n) => nodeByOffset.set(n.rowOffset, n));
+          }
+
           for (const subRowIdx of matrix.subtotalRowIndices) {
             const sheetRow = startRow + subRowIdx + 1;
             const subRng = sheet.getRangeByIndexes(sheetRow, startCol, 1, colCount);
+            const treeNode = nodeByOffset.get(subRowIdx);
             subRng.format.font.bold = true;
-            subRng.format.fill.color = "#F3F2F1";
-            subRng.format.borders.getItem("EdgeTop").style = Excel.BorderLineStyle.continuous;
-            subRng.format.borders.getItem("EdgeBottom").style = Excel.BorderLineStyle.continuous;
+            if (treeNode) {
+              subRng.format.fill.color = treeNode.level === 0 ? "#EDF2FA" : "#F6F8FA";
+              if (treeNode.level === 0) {
+                subRng.format.borders.getItem("EdgeTop").style = Excel.BorderLineStyle.continuous;
+              }
+            } else {
+              subRng.format.fill.color = "#F3F2F1";
+              subRng.format.borders.getItem("EdgeTop").style = Excel.BorderLineStyle.continuous;
+              subRng.format.borders.getItem("EdgeBottom").style = Excel.BorderLineStyle.continuous;
+            }
           }
 
           for (const grp of matrix.outlineGroups) {
@@ -1003,6 +1373,32 @@ export async function writeLookerDataToWorksheet(
                 colCount
               );
               grpRng.group(Excel.GroupOption.byRows);
+            }
+          }
+
+          if (matrix.treeNodes && matrix.treeNodes.length > 0 && totalRows > 0) {
+            const hiddenFlags = computeTreeRowHiddenFlags(
+              totalRows,
+              matrix.treeNodes,
+              matrix.grandTotalRowIndex
+            );
+            let runStart = 0;
+            while (runStart < totalRows) {
+              const state = hiddenFlags[runStart];
+              let runEnd = runStart;
+              while (runEnd + 1 < totalRows && hiddenFlags[runEnd + 1] === state) {
+                runEnd++;
+              }
+              if (state) {
+                const hideRng = sheet.getRangeByIndexes(
+                  startRow + 1 + runStart,
+                  startCol,
+                  runEnd - runStart + 1,
+                  colCount
+                );
+                hideRng.rowHidden = true;
+              }
+              runStart = runEnd + 1;
             }
           }
         }
@@ -1114,4 +1510,153 @@ export async function writeLookerDataToWorksheet(
   });
 
   return writtenSheetId;
+}
+
+/**
+ * Applies `rowHidden` runs and updates `▸` / `▾` group cell labels in-place on the active
+ * or target worksheet when a parent node or display level is toggled.
+ */
+async function syncTreeVisibilityToWorksheet(
+  targetSheetId: string | undefined,
+  anchorCell: string | undefined,
+  totalRows: number,
+  colCount: number,
+  treeNodes: HierarchyTreeNodeMeta[],
+  showGroupCounts: boolean,
+  hasGrandTotal: boolean,
+  focusAfterRowAndCol?: { row: number; col: number }
+): Promise<void> {
+  const { startRow, startCol } = parseCellAddress(anchorCell);
+  const grandTotalRowIndex = hasGrandTotal ? totalRows - 1 : null;
+  const hiddenFlags = computeTreeRowHiddenFlags(totalRows, treeNodes, grandTotalRowIndex);
+
+  await Excel.run(async (context) => {
+    const sheet = targetSheetId
+      ? context.workbook.worksheets.getItem(targetSheetId)
+      : context.workbook.worksheets.getActiveWorksheet();
+
+    // 1. Update parent `▸` / `▾` cell labels in the Group column
+    for (const node of treeNodes) {
+      const cell = sheet.getRangeByIndexes(startRow + 1 + node.rowOffset, startCol, 1, 1);
+      cell.values = [
+        [
+          formatTreeGroupCellLabel(
+            node.label,
+            node.level,
+            true,
+            node.isExpanded,
+            node.childCount,
+            showGroupCounts
+          ),
+        ],
+      ];
+    }
+
+    // 2. Apply contiguous rowHidden runs
+    let runStart = 0;
+    while (runStart < totalRows) {
+      const state = hiddenFlags[runStart];
+      let runEnd = runStart;
+      while (runEnd + 1 < totalRows && hiddenFlags[runEnd + 1] === state) {
+        runEnd++;
+      }
+      const rng = sheet.getRangeByIndexes(
+        startRow + 1 + runStart,
+        startCol,
+        runEnd - runStart + 1,
+        Math.max(1, colCount)
+      );
+      rng.rowHidden = state;
+      runStart = runEnd + 1;
+    }
+
+    if (focusAfterRowAndCol) {
+      const nextFocus = sheet.getRangeByIndexes(
+        focusAfterRowAndCol.row,
+        focusAfterRowAndCol.col,
+        1,
+        1
+      );
+      nextFocus.select();
+    }
+
+    await context.sync();
+  });
+}
+
+/**
+ * Toggles a single parent hierarchy node in the `Group` column (`startCol`) at `clickedSheetRow` (0-based)
+ * or by explicit `rowOffset`, expanding/collapsing its descendants in-place without re-querying Looker.
+ * Returns updated `HierarchyTreeNodeMeta[]` if a parent node was toggled, or `null` if the row is not a parent node.
+ */
+export async function toggleWorksheetTreeNode(
+  targetSheetId: string | undefined,
+  options: WriteOptions,
+  totalRows: number,
+  clickedSheetRow0Based: number,
+  clickedSheetCol0Based: number
+): Promise<HierarchyTreeNodeMeta[] | null> {
+  if (!options.enableRowGroups || !options.treeNodes || options.treeNodes.length === 0) {
+    return null;
+  }
+  const { startRow, startCol } = parseCellAddress(options.anchorCell);
+  if (clickedSheetCol0Based !== startCol || clickedSheetRow0Based < startRow + 1) {
+    return null;
+  }
+  const clickedOffset = clickedSheetRow0Based - (startRow + 1);
+  const targetIdx = options.treeNodes.findIndex((n) => n.rowOffset === clickedOffset);
+  if (targetIdx === -1) {
+    return null;
+  }
+
+  const updatedNodes = options.treeNodes.map((n, i) =>
+    i === targetIdx ? { ...n, isExpanded: !n.isExpanded } : { ...n }
+  );
+
+  const colCount = Math.max(2, options.prevColCount || 2);
+  await syncTreeVisibilityToWorksheet(
+    targetSheetId,
+    options.anchorCell,
+    totalRows,
+    colCount,
+    updatedNodes,
+    options.showGroupCounts !== false,
+    Boolean(options.includeTotals),
+    { row: clickedSheetRow0Based, col: startCol + 1 }
+  );
+
+  return updatedNodes;
+}
+
+/**
+ * Expands or collapses all hierarchy nodes in a Row Groups worksheet table to the specified
+ * `displayLevel` (`all_collapsed`, `level_1`, `level_2`, `level_3`, `all_expanded`) in-place.
+ */
+export async function applyWorksheetTreeDisplayLevel(
+  targetSheetId: string | undefined,
+  options: WriteOptions,
+  totalRows: number,
+  displayLevel: RowGroupDisplayLevel
+): Promise<HierarchyTreeNodeMeta[] | null> {
+  if (!options.enableRowGroups || !options.treeNodes || options.treeNodes.length === 0) {
+    return null;
+  }
+  const maxVisibleLevel = getMaxVisibleLevel(displayLevel);
+  const updatedNodes = options.treeNodes.map((n) => ({
+    ...n,
+    isExpanded: n.level < maxVisibleLevel,
+  }));
+
+  const colCount = Math.max(2, options.prevColCount || 2);
+  await syncTreeVisibilityToWorksheet(
+    targetSheetId,
+    options.anchorCell,
+    totalRows,
+    colCount,
+    updatedNodes,
+    options.showGroupCounts !== false,
+    Boolean(options.includeTotals)
+  );
+
+  return updatedNodes;
 }
