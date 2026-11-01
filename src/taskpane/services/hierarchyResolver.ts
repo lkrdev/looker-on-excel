@@ -312,3 +312,68 @@ export function buildRowDrillQueryPayload(
     filters,
   };
 }
+
+/**
+ * Ensures that all subtotaled/grouped dimensions (`subtotalDims`) appear at the front
+ * of the Looker `sorts` array (preserving any explicit `asc`/`desc` direction already set
+ * on those dimensions), followed by any remaining sorts (e.g. measure sorts).
+ */
+export function buildEffectiveSortsForSubtotals(
+  sorts: string[],
+  subtotalDims: string[]
+): string[] {
+  if (!subtotalDims || subtotalDims.length === 0) {
+    return sorts;
+  }
+  const parseField = (s: string) => s.trim().split(/\s+/)[0];
+  const existingMap = new Map<string, string>();
+  for (const s of sorts) {
+    const f = parseField(s);
+    if (!existingMap.has(f)) {
+      existingMap.set(f, s.includes(" ") ? s : `${f} asc`);
+    }
+  }
+
+  const leading: string[] = [];
+  const subSet = new Set<string>(subtotalDims);
+  for (const dim of subtotalDims) {
+    leading.push(existingMap.get(dim) || `${dim} asc`);
+  }
+
+  const trailing = sorts.filter((s) => !subSet.has(parseField(s)));
+  return [...leading, ...trailing];
+}
+
+/**
+ * Selects a LookML HierarchyLadder up to `maxDepth` (1-based number of levels, default all levels),
+ * placing the hierarchy dimensions at the front of `selectedFields` (before measures) and returning
+ * the ordered `rowGroupFields`.
+ */
+export function applyHierarchyLadderToSelection(
+  selectedFields: string[],
+  ladder: HierarchyLadder,
+  allFields: FieldDefinition[],
+  maxDepth?: number
+): { fields: string[]; rowGroupFields: string[] } {
+  const depth = maxDepth && maxDepth >= 2 ? Math.min(maxDepth, ladder.levels.length) : ladder.levels.length;
+  const targetLevels = ladder.levels.slice(0, depth);
+  const ladderAllSet = new Set<string>(ladder.levels);
+  const measureSet = new Set<string>(
+    allFields.filter((f) => f.category === "measure").map((f) => f.name)
+  );
+
+  // Remove any existing levels of this ladder from selectedFields before inserting targetLevels in order
+  const remaining = selectedFields.filter((f) => !ladderAllSet.has(f));
+  const firstMeasureIdx = remaining.findIndex((f) => measureSet.has(f));
+  const nextFields = [...remaining];
+  if (firstMeasureIdx >= 0) {
+    nextFields.splice(firstMeasureIdx, 0, ...targetLevels);
+  } else {
+    nextFields.push(...targetLevels);
+  }
+
+  return {
+    fields: nextFields,
+    rowGroupFields: targetLevels,
+  };
+}
