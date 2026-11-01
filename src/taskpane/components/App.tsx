@@ -684,7 +684,8 @@ export const App: React.FC = () => {
         dataRows,
         pivots.length > 0 ? pivots : undefined,
         Boolean(tableOptions.includeRowTotals && pivots.length > 0),
-        bundle.pivotsMeta
+        bundle.pivotsMeta,
+        tableOptions.pivotGroupMode || "measure_first"
       ).expandedColumns.length;
 
       const targetSheetId =
@@ -869,7 +870,8 @@ export const App: React.FC = () => {
         dataRows,
         activePivots,
         Boolean(effectivePayload.row_total),
-        bundle.pivotsMeta
+        bundle.pivotsMeta,
+        sheetConfig.options?.pivotGroupMode || "measure_first"
       ).expandedColumns.length;
 
       const effectiveAnchor = (
@@ -975,7 +977,8 @@ export const App: React.FC = () => {
           dataRows,
           sPivots,
           Boolean(s.config.queryPayload.row_total),
-          bundle.pivotsMeta
+          bundle.pivotsMeta,
+          s.config.options?.pivotGroupMode || "measure_first"
         ).expandedColumns.length;
 
         const effectiveAnchor = (
@@ -1174,7 +1177,8 @@ export const App: React.FC = () => {
         dataRows,
         orderedPayload.pivots || undefined,
         Boolean(orderedPayload.row_total),
-        bundle.pivotsMeta
+        bundle.pivotsMeta,
+        tableOptions.pivotGroupMode || "measure_first"
       ).expandedColumns.length;
 
       const effectiveDest = forceNewSheet ? "new" : destination;
@@ -1418,6 +1422,7 @@ export const App: React.FC = () => {
                   onToggleSort={handleToggleSort}
                   pivots={pivots}
                   onTogglePivot={handleTogglePivot}
+                  onSetPivots={setPivots}
                   onReorderFields={setSelectedFields}
                   options={tableOptions}
                   onOptionsChange={(upd) => setTableOptions((prev) => ({ ...prev, ...upd }))}
@@ -1442,6 +1447,11 @@ export const App: React.FC = () => {
                   onDestinationChange={setDestination}
                   options={tableOptions}
                   onOptionsChange={(upd) => setTableOptions((prev) => ({ ...prev, ...upd }))}
+                  pivots={pivots}
+                  selectedMeasureLabels={selectedFields
+                    .map((fk) => exploreDetail.fields.measures.find((m) => m.name === fk))
+                    .filter((m): m is NonNullable<typeof m> => Boolean(m))
+                    .map((m) => m.label_short || m.label || m.name)}
                 />
               </>
             )}

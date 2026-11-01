@@ -1,5 +1,7 @@
 import { PivotDescriptor } from "./queryTaskRunner";
 
+export type PivotGroupMode = "measure_first" | "cohort_first";
+
 export interface ColumnDefinition {
   fieldKey: string;
   label: string;
@@ -7,6 +9,10 @@ export interface ColumnDefinition {
   excelFormat?: string;
   category?: "dimension" | "measure" | "parameter";
   isRowTotal?: boolean;
+  measureKey?: string;
+  measureLabel?: string;
+  pivotKey?: string;
+  pivotValues?: string[];
 }
 
 export interface BoundingBox {
@@ -46,6 +52,8 @@ export interface WriteOptions {
   targetSheetId?: string;
   pivots?: string[];
   pivotsMeta?: PivotDescriptor[] | null;
+  pivotGroupMode?: PivotGroupMode;
+  useMultiRowCrosstabHeader?: boolean;
   prevRowCount?: number;
   prevColCount?: number;
   includeTotals?: boolean;
@@ -122,6 +130,18 @@ export function calculateBatchSize(colCount: number, targetCellBudget: number = 
   return Math.max(500, Math.floor(targetCellBudget / Math.max(1, colCount)));
 }
 
+export interface CrosstabHeaderMerge {
+  rowOffset: number;
+  colOffset: number;
+  rowCount: number;
+  colCount: number;
+}
+
+export interface CrosstabHeaderMatrix {
+  headerRows: string[][];
+  merges: CrosstabHeaderMerge[];
+}
+
 const CELL_METADATA_KEYS = new Set([
   "value",
   "rendered",
@@ -180,7 +200,6 @@ export function resolveCleanPivotValues(
       .map((s) => (s === "null" ? "None" : s.trim()));
     const expectedCount = pivots && pivots.length > 0 ? pivots.length : parts.length;
     if (parts.length > expectedCount) {
-      // Strip Looker's internal numeric `__sort_` tokens injected after `case:` dimensions
       const filtered = parts.filter(
         (token, idx) => !(idx > 0 && idx < parts.length - 1 && /^\d+$/.test(token))
       );
@@ -191,20 +210,88 @@ export function resolveCleanPivotValues(
     return parts;
   }
 
+  if (pivots && pivots.length > 1 && rawPivotKey.includes("|")) {
+    return rawPivotKey.split("|").map((s) => (s === "null" ? "None" : s.trim()));
+  }
+
   return [rawPivotKey === "null" ? "None" : rawPivotKey];
 }
 
 /**
+ * Extracts all flat pivot cohort keys, their per-dimension pivot values, and scalar cell values
+ * from a measure cell object (handling both 1-dim / json_detail flat maps and multi-level nested JSON maps).
+ */
+function extractMeasurePivotLeaves(
+  measureObj: Record<string, any>,
+  pivotField: string,
+  pivots?: string[],
+  pivotsMeta?: PivotDescriptor[] | null
+): Array<{ pivotKey: string; pivotValues: string[]; value: any; path: string[] }> {
+  const inner = measureObj[pivotField];
+  if (!inner || typeof inner !== "object") {
+    return [];
+  }
+
+  const leaves: Array<{ pivotKey: string; pivotValues: string[]; value: any; path: string[] }> = [];
+
+  const walk = (node: Record<string, any>, currentVals: string[], currentPath: string[]) => {
+    for (const [k, v] of Object.entries(node)) {
+      if (
+        v &&
+        typeof v === "object" &&
+        !Array.isArray(v) &&
+        Object.keys(v).length > 0 &&
+        pivots &&
+        pivots.includes(k)
+      ) {
+        walk(v, currentVals, [...currentPath, k]);
+      } else if (v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).length > 0) {
+        walk(v, [...currentVals, k === "null" ? "None" : k], [...currentPath, k]);
+      } else {
+        const rawVals = [...currentVals, k === "null" ? "None" : k];
+        const pivotKey = currentVals.length === 0 ? k : rawVals.join("|");
+        const resolvedValues =
+          rawVals.length === 1
+            ? resolveCleanPivotValues(pivotKey, pivots, pivotsMeta)
+            : rawVals;
+
+        leaves.push({
+          pivotKey,
+          pivotValues: resolvedValues,
+          value: v,
+          path: [...currentPath, k],
+        });
+      }
+    }
+  };
+
+  walk(inner, [], [pivotField]);
+  return leaves;
+}
+
+function readNestedPath(obj: any, path: string[]): any {
+  let curr = obj;
+  for (const key of path) {
+    if (curr === null || curr === undefined || typeof curr !== "object") {
+      return undefined;
+    }
+    curr = curr[key];
+  }
+  return curr;
+}
+
+/**
  * Detects nested pivot structures in Looker JSON / json_detail query results and expands them
- * into tabular Crosstab columns (including Looker-computed Row Totals when present)
- * with appropriate labels and number formatting.
+ * into tabular Crosstab columns (including multi-dimension pivots, cohort vs. measure grouping,
+ * and Looker-computed Row Totals) with appropriate labels and number formatting.
  */
 export function expandPivotedColumns(
   columns: ColumnDefinition[],
   dataRows: Record<string, any>[],
   pivots?: string[],
   includeRowTotals?: boolean,
-  pivotsMeta?: PivotDescriptor[] | null
+  pivotsMeta?: PivotDescriptor[] | null,
+  pivotGroupMode: PivotGroupMode = "measure_first"
 ): {
   expandedColumns: ColumnDefinition[];
   getValue: (row: Record<string, any>, col: ColumnDefinition) => any;
@@ -245,11 +332,23 @@ export function expandPivotedColumns(
     };
   }
 
-  const expandedColumns: ColumnDefinition[] = [];
   const pivotAccessorMap = new Map<
     string,
-    { measureKey: string; pivotField: string; pivotVal: string; isRowTotal?: boolean }
+    { measureKey: string; path: string[]; isRowTotal?: boolean }
   >();
+
+  interface CohortInfo {
+    pivotKey: string;
+    pivotValues: string[];
+    path: string[];
+  }
+
+  const nonPivotedColumns: ColumnDefinition[] = [];
+  const pivotedMeasureCols: ColumnDefinition[] = [];
+  const cohortsByMeasure = new Map<string, Map<string, CohortInfo>>();
+  const globalCohortOrder: CohortInfo[] = [];
+  const seenGlobalCohortKeys = new Set<string>();
+  let anyRowTotal = Boolean(includeRowTotals);
 
   columns.forEach((col) => {
     if (discoveredPivotDims.has(col.fieldKey)) {
@@ -257,74 +356,132 @@ export function expandPivotedColumns(
     }
 
     const val = pivotedColSample.get(col.fieldKey);
-    if (val) {
-      const pivotFields = Object.keys(val).filter((pf) => pf !== "$$$_row_total_$$$");
-      const pivotField = pivotFields[0];
+    if (!val) {
+      nonPivotedColumns.push(col);
+      return;
+    }
 
-      const seenPivotVals = new Set<string>();
-      let hasRowTotalInRows = Boolean(includeRowTotals);
+    pivotedMeasureCols.push(col);
+    const pivotFields = Object.keys(val).filter((pf) => pf !== "$$$_row_total_$$$");
+    const pivotField = pivotFields[0];
+    const measureCohorts = new Map<string, CohortInfo>();
 
-      // Seed pivot column order from Looker's `pivotsMeta` when available
-      if (pivotsMeta && pivotsMeta.length > 0) {
-        pivotsMeta.forEach((pm) => {
-          if (!pm.is_total && pm.key !== "$$$_row_total_$$$") {
-            seenPivotVals.add(pm.key);
-          }
-        });
+    // Seed cohort ordering from `pivotsMeta` if present
+    if (pivotsMeta && pivotsMeta.length > 0) {
+      for (const pm of pivotsMeta) {
+        if (pm.is_total || pm.key === "$$$_row_total_$$$") continue;
+        const resolvedValues = resolveCleanPivotValues(pm.key, pivots, pivotsMeta);
+        const info: CohortInfo = {
+          pivotKey: pm.key,
+          pivotValues: resolvedValues,
+          path: [pivotField, pm.key],
+        };
+        measureCohorts.set(pm.key, info);
+        if (!seenGlobalCohortKeys.has(pm.key)) {
+          seenGlobalCohortKeys.add(pm.key);
+          globalCohortOrder.push(info);
+        }
       }
+    }
 
-      dataRows.forEach((row) => {
-        const measureObj = row[col.fieldKey];
-        if (measureObj && typeof measureObj === "object") {
-          if ("$$$_row_total_$$$" in measureObj) {
-            hasRowTotalInRows = true;
+    dataRows.forEach((row) => {
+      const measureObj = row[col.fieldKey];
+      if (measureObj && typeof measureObj === "object") {
+        if ("$$$_row_total_$$$" in measureObj) {
+          anyRowTotal = true;
+        }
+        const leaves = extractMeasurePivotLeaves(measureObj, pivotField, pivots, pivotsMeta);
+        for (const leaf of leaves) {
+          if (leaf.pivotKey === "null" && leaf.value === 0) {
+            continue;
           }
-          const inner = measureObj[pivotField];
-          if (inner && typeof inner === "object") {
-            Object.keys(inner).forEach((pv) => {
-              if (pv !== "null" || inner[pv] !== 0) {
-                seenPivotVals.add(pv);
-              }
-            });
+          if (!measureCohorts.has(leaf.pivotKey)) {
+            const info: CohortInfo = {
+              pivotKey: leaf.pivotKey,
+              pivotValues: leaf.pivotValues,
+              path: leaf.path,
+            };
+            measureCohorts.set(leaf.pivotKey, info);
+            if (!seenGlobalCohortKeys.has(leaf.pivotKey)) {
+              seenGlobalCohortKeys.add(leaf.pivotKey);
+              globalCohortOrder.push(info);
+            }
           }
         }
-      });
-
-      seenPivotVals.forEach((pVal) => {
-        const key = `__pivot__:${col.fieldKey}:::${pivotField}:::${pVal}`;
-        const cleanVals = resolveCleanPivotValues(pVal, pivots, pivotsMeta);
-        const displayPivotVal = cleanVals.join(" · ");
-        expandedColumns.push({
-          fieldKey: key,
-          label: `${col.label} (${displayPivotVal})`,
-          type: col.type,
-          excelFormat: col.excelFormat,
-          category: col.category || "measure",
-        });
-        pivotAccessorMap.set(key, { measureKey: col.fieldKey, pivotField, pivotVal: pVal });
-      });
-
-      if (hasRowTotalInRows) {
-        const rtKey = `__pivot_row_total__:${col.fieldKey}`;
-        expandedColumns.push({
-          fieldKey: rtKey,
-          label: `${col.label} (Row Total)`,
-          type: col.type,
-          excelFormat: col.excelFormat,
-          category: col.category || "measure",
-          isRowTotal: true,
-        });
-        pivotAccessorMap.set(rtKey, {
-          measureKey: col.fieldKey,
-          pivotField,
-          pivotVal: "$$$_row_total_$$$",
-          isRowTotal: true,
-        });
       }
-    } else {
-      expandedColumns.push(col);
-    }
+    });
+
+    cohortsByMeasure.set(col.fieldKey, measureCohorts);
   });
+
+  const expandedColumns: ColumnDefinition[] = [...nonPivotedColumns];
+
+  const createPivotCol = (col: ColumnDefinition, cohort: CohortInfo): ColumnDefinition => {
+    const key = `__pivot__:${col.fieldKey}:::${cohort.pivotKey}`;
+    const displayCohort = cohort.pivotValues.join(" · ");
+    pivotAccessorMap.set(key, {
+      measureKey: col.fieldKey,
+      path: cohort.path,
+    });
+    return {
+      fieldKey: key,
+      label: `${col.label} (${displayCohort})`,
+      type: col.type,
+      excelFormat: col.excelFormat,
+      category: col.category || "measure",
+      measureKey: col.fieldKey,
+      measureLabel: col.label,
+      pivotKey: cohort.pivotKey,
+      pivotValues: cohort.pivotValues,
+    };
+  };
+
+  const createRowTotalCol = (col: ColumnDefinition): ColumnDefinition => {
+    const rtKey = `__pivot_row_total__:${col.fieldKey}`;
+    pivotAccessorMap.set(rtKey, {
+      measureKey: col.fieldKey,
+      path: ["$$$_row_total_$$$"],
+      isRowTotal: true,
+    });
+    return {
+      fieldKey: rtKey,
+      label: `${col.label} (Row Total)`,
+      type: col.type,
+      excelFormat: col.excelFormat,
+      category: col.category || "measure",
+      isRowTotal: true,
+      measureKey: col.fieldKey,
+      measureLabel: col.label,
+    };
+  };
+
+  if (pivotGroupMode === "cohort_first") {
+    for (const cohort of globalCohortOrder) {
+      for (const mCol of pivotedMeasureCols) {
+        const mCohorts = cohortsByMeasure.get(mCol.fieldKey);
+        const match = mCohorts?.get(cohort.pivotKey) || cohort;
+        expandedColumns.push(createPivotCol(mCol, match));
+      }
+    }
+    if (anyRowTotal) {
+      for (const mCol of pivotedMeasureCols) {
+        expandedColumns.push(createRowTotalCol(mCol));
+      }
+    }
+  } else {
+    // Default "measure_first" grouping
+    for (const mCol of pivotedMeasureCols) {
+      const mCohorts = cohortsByMeasure.get(mCol.fieldKey);
+      if (mCohorts) {
+        for (const cohort of mCohorts.values()) {
+          expandedColumns.push(createPivotCol(mCol, cohort));
+        }
+      }
+      if (anyRowTotal) {
+        expandedColumns.push(createRowTotalCol(mCol));
+      }
+    }
+  }
 
   return {
     expandedColumns,
@@ -334,7 +491,7 @@ export function expandPivotedColumns(
         if (acc.isRowTotal) {
           return row[acc.measureKey]?.["$$$_row_total_$$$"];
         }
-        return row[acc.measureKey]?.[acc.pivotField]?.[acc.pivotVal];
+        return readNestedPath(row[acc.measureKey], acc.path);
       }
       const val = row[col.fieldKey];
       if (typeof val === "object" && val !== null) {
@@ -343,6 +500,98 @@ export function expandPivotedColumns(
       return val;
     },
   };
+}
+
+/**
+ * Builds a multi-row Crosstab header matrix (1 row per pivoted dimension + 1 bottom row for Measure/Dimension labels)
+ * along with horizontal merge descriptors for contiguous identical pivot cohort headers.
+ */
+export function buildCrosstabHeaderMatrix(
+  expandedColumns: ColumnDefinition[],
+  pivots?: string[],
+  trailingHeaders: string[] = []
+): CrosstabHeaderMatrix {
+  const pivotDepth = Math.max(
+    pivots?.length || 0,
+    expandedColumns.reduce((maxD, c) => Math.max(maxD, c.pivotValues?.length || 0), 0)
+  );
+
+  if (pivotDepth === 0) {
+    return {
+      headerRows: [[...expandedColumns.map((c) => c.label || c.fieldKey), ...trailingHeaders]],
+      merges: [],
+    };
+  }
+
+  const totalCols = expandedColumns.length + trailingHeaders.length;
+  const headerRows: string[][] = [];
+
+  for (let r = 0; r < pivotDepth; r++) {
+    const rowCells: string[] = [];
+    for (let c = 0; c < expandedColumns.length; c++) {
+      const col = expandedColumns[c];
+      if (col.isRowTotal) {
+        rowCells.push(r === 0 ? "Row Total" : "");
+      } else if (col.pivotValues && col.pivotValues.length > 0) {
+        rowCells.push(col.pivotValues[r] ?? "");
+      } else {
+        rowCells.push("");
+      }
+    }
+    for (let t = 0; t < trailingHeaders.length; t++) {
+      rowCells.push("");
+    }
+    headerRows.push(rowCells);
+  }
+
+  // Bottom row: Measure labels for pivoted/row-total columns, and Dimension labels for row dimensions
+  const bottomRow: string[] = expandedColumns.map((col) => {
+    if (col.isRowTotal) {
+      return col.measureLabel ? `${col.measureLabel} (Row Total)` : col.label;
+    }
+    if (col.measureLabel && col.pivotValues && col.pivotValues.length > 0) {
+      return col.measureLabel;
+    }
+    return col.label || col.fieldKey;
+  });
+  for (const th of trailingHeaders) {
+    bottomRow.push(th);
+  }
+  headerRows.push(bottomRow);
+
+  // Compute horizontal merges on each pivot cohort row (0 .. pivotDepth - 1)
+  const merges: CrosstabHeaderMerge[] = [];
+  for (let r = 0; r < pivotDepth; r++) {
+    let runStart = 0;
+    while (runStart < totalCols) {
+      const val = headerRows[r][runStart];
+      if (!val) {
+        runStart++;
+        continue;
+      }
+      let runEnd = runStart + 1;
+      while (
+        runEnd < totalCols &&
+        headerRows[r][runEnd] === val &&
+        // Only merge if all parent pivot rows above (0 .. r-1) also match
+        Array.from({ length: r }, (_, pr) => headerRows[pr][runEnd] === headerRows[pr][runStart]).every(Boolean)
+      ) {
+        runEnd++;
+      }
+      const runLen = runEnd - runStart;
+      if (runLen >= 2) {
+        merges.push({
+          rowOffset: r,
+          colOffset: runStart,
+          rowCount: 1,
+          colCount: runLen,
+        });
+      }
+      runStart = runEnd;
+    }
+  }
+
+  return { headerRows, merges };
 }
 
 export interface WorksheetRowMatrixResult {
@@ -840,13 +1089,18 @@ export async function writeLookerDataToWorksheet(
     effectiveRows,
     options.pivots,
     options.includeRowTotals,
-    options.pivotsMeta
+    options.pivotsMeta,
+    options.pivotGroupMode || "measure_first"
   );
   const colCount = Math.max(1, expandedColumns.length);
   const totalRows = effectiveRows.length;
   const batchSize = calculateBatchSize(colCount);
   const nullVal = options.nullDisplay ?? "";
   const hasSubtotals = matrix.subtotalRowIndices.length > 0;
+  const useMultiRowHeader = Boolean(
+    options.useMultiRowCrosstabHeader && options.pivots && options.pivots.length > 0
+  );
+  const headerRowCount = useMultiRowHeader ? (options.pivots?.length || 1) + 1 : 1;
   let writtenSheetId = "";
 
   await Excel.run(async (context) => {
@@ -991,7 +1245,7 @@ export async function writeLookerDataToWorksheet(
               }
             }
 
-            if (existingTable && (!options.useExcelTable || hasSubtotals)) {
+            if (existingTable && (!options.useExcelTable || hasSubtotals || useMultiRowHeader)) {
               existingTable.convertToRange();
               existingTable = null;
               await context.sync();
@@ -1021,7 +1275,7 @@ export async function writeLookerDataToWorksheet(
         !existingTable &&
         startRow === 0 &&
         startCol === 0 &&
-        overlapsProtectedRange(startRow, startCol, Math.max(1, totalRows + 1), colCount)
+        overlapsProtectedRange(startRow, startCol, Math.max(1, totalRows + headerRowCount), colCount)
       ) {
         const allSheets = context.workbook.worksheets;
         allSheets.load(["items/id", "items/name"]);
@@ -1072,7 +1326,12 @@ export async function writeLookerDataToWorksheet(
           if (options.prevColCount && options.prevColCount > 0 && options.prevColCount !== colCount) {
             const deltaCols = colCount - options.prevColCount;
             const boundaryCol = startCol + options.prevColCount;
-            const checkFormulaCell = sheet.getRangeByIndexes(startRow + 1, boundaryCol, 1, 1);
+            const checkFormulaCell = sheet.getRangeByIndexes(
+              startRow + headerRowCount,
+              boundaryCol,
+              1,
+              1
+            );
             checkFormulaCell.load(["formulas"]);
             await context.sync();
             const hasFormulaAtPrevBoundary =
@@ -1086,7 +1345,7 @@ export async function writeLookerDataToWorksheet(
                 overlapsProtectedRange(
                   startRow,
                   boundaryCol,
-                  Math.max(prevTotalRows, totalRows + 1),
+                  Math.max(prevTotalRows, totalRows + headerRowCount),
                   deltaCols
                 ))
             ) {
@@ -1116,7 +1375,7 @@ export async function writeLookerDataToWorksheet(
 
           if (options.autoExpandFormulas) {
             const scanRange = sheet.getRangeByIndexes(
-              startRow,
+              startRow + headerRowCount - 1,
               startCol + colCount,
               2,
               maxFormulaColsToScan
@@ -1125,7 +1384,14 @@ export async function writeLookerDataToWorksheet(
             await context.sync();
 
             for (let offset = 0; offset < maxFormulaColsToScan; offset++) {
-              if (overlapsProtectedRange(startRow, startCol + colCount + offset, 2, 1)) {
+              if (
+                overlapsProtectedRange(
+                  startRow + headerRowCount - 1,
+                  startCol + colCount + offset,
+                  2,
+                  1
+                )
+              ) {
                 break;
               }
               const formulaCell = scanRange.formulas?.[1]?.[offset];
@@ -1162,6 +1428,7 @@ export async function writeLookerDataToWorksheet(
         existingTable &&
         options.useExcelTable &&
         !hasSubtotals &&
+        !useMultiRowHeader &&
         listObjectBodyRows > 0 &&
         (listObjectBodyRows + 1 < prevTotalRows || protectedCols < prevTotalCols)
       ) {
@@ -1178,10 +1445,24 @@ export async function writeLookerDataToWorksheet(
 
       // 2.8 Clear residual rows and columns from previous larger runs (anchored at startRow, startCol)
       if (!isCreatingNewSheet && (prevTotalRows > 0 || prevTotalCols > 0)) {
+        // Unmerge any previously merged multi-row header cells before clearing/writing
+        try {
+          const prevHeaderArea = sheet.getRangeByIndexes(
+            startRow,
+            startCol,
+            Math.max(headerRowCount, 4),
+            Math.max(protectedCols, prevTotalCols)
+          );
+          prevHeaderArea.unmerge();
+          await context.sync();
+        } catch {
+          // Ignore if no merged cells existed
+        }
+
         const { extraColRange, extraRowRange } = computeResidualRanges(
           prevTotalRows,
           prevTotalCols,
-          totalRows + 1,
+          totalRows + headerRowCount,
           protectedCols,
           startRow,
           startCol
@@ -1234,7 +1515,7 @@ export async function writeLookerDataToWorksheet(
         }
       }
 
-      // 3. Write Header at (startRow, startCol)
+      // 3. Write Header (either 1-row flat header or Multi-Row Merged Crosstab Header) at (startRow, startCol)
       const seenHeaders = new Map<string, number>();
       const deduplicateHeader = (raw: string): string => {
         const base = (raw || "Column").trim();
@@ -1250,23 +1531,60 @@ export async function writeLookerDataToWorksheet(
         deduplicateHeader(fCol.header)
       );
 
-      const allHeaderLabels = [...uniqueHeaderLabels, ...uniqueFormulaHeaders];
-      const headerRange = sheet.getRangeByIndexes(startRow, startCol, 1, protectedCols);
-      headerRange.values = [allHeaderLabels];
-      if (!options.preserveUserFormatting) {
-        const lookerHeaderRange = sheet.getRangeByIndexes(startRow, startCol, 1, colCount);
-        lookerHeaderRange.format.font.bold = true;
-        lookerHeaderRange.format.fill.color = "#1D5288"; // Looker Brand Blue
-        lookerHeaderRange.format.font.color = "#FFFFFF";
+      if (useMultiRowHeader) {
+        const crosstabHeader = buildCrosstabHeaderMatrix(
+          expandedColumns,
+          options.pivots,
+          uniqueFormulaHeaders
+        );
+        const hRows = crosstabHeader.headerRows.length;
+        const headerRange = sheet.getRangeByIndexes(startRow, startCol, hRows, protectedCols);
+        headerRange.values = crosstabHeader.headerRows;
+
+        const lookerTopHeader = sheet.getRangeByIndexes(startRow, startCol, hRows - 1, colCount);
+        lookerTopHeader.format.font.bold = true;
+        lookerTopHeader.format.fill.color = "#1D5288";
+        lookerTopHeader.format.font.color = "#FFFFFF";
+        lookerTopHeader.format.horizontalAlignment = Excel.HorizontalAlignment.center;
+
+        const lookerBottomHeader = sheet.getRangeByIndexes(
+          startRow + hRows - 1,
+          startCol,
+          1,
+          colCount
+        );
+        lookerBottomHeader.format.font.bold = true;
+        lookerBottomHeader.format.fill.color = "#2B6CB0";
+        lookerBottomHeader.format.font.color = "#FFFFFF";
+
+        for (const m of crosstabHeader.merges) {
+          const mergeRng = sheet.getRangeByIndexes(
+            startRow + m.rowOffset,
+            startCol + m.colOffset,
+            m.rowCount,
+            m.colCount
+          );
+          mergeRng.merge();
+        }
+      } else {
+        const allHeaderLabels = [...uniqueHeaderLabels, ...uniqueFormulaHeaders];
+        const headerRange = sheet.getRangeByIndexes(startRow, startCol, 1, protectedCols);
+        headerRange.values = [allHeaderLabels];
+        if (!options.preserveUserFormatting) {
+          const lookerHeaderRange = sheet.getRangeByIndexes(startRow, startCol, 1, colCount);
+          lookerHeaderRange.format.font.bold = true;
+          lookerHeaderRange.format.fill.color = "#1D5288"; // Looker Brand Blue
+          lookerHeaderRange.format.font.color = "#FFFFFF";
+        }
       }
 
       if (options.freezeHeader !== false && startRow === 0) {
-        sheet.freezePanes.freezeRows(1);
+        sheet.freezePanes.freezeRows(headerRowCount);
       }
       await context.sync();
 
-      // 4. Batch write data in dynamic chunks starting at (startRow + 1, startCol)
-      let currentRowOffset = 1;
+      // 4. Batch write data in dynamic chunks starting at (startRow + headerRowCount, startCol)
+      let currentRowOffset = headerRowCount;
       for (let i = 0; i < totalRows; i += batchSize) {
         const slice = effectiveRows.slice(i, i + batchSize);
         const rowBlock: (string | number | boolean)[][] = slice.map((item) =>
@@ -1296,16 +1614,17 @@ export async function writeLookerDataToWorksheet(
         currentRowOffset += rowBlock.length;
         await context.sync();
 
+        const rowsWritten = currentRowOffset - headerRowCount;
         onProgress(
-          Math.min(100, Math.round((currentRowOffset / totalRows) * 100)),
-          currentRowOffset
+          Math.min(100, Math.round((rowsWritten / Math.max(1, totalRows)) * 100)),
+          rowsWritten
         );
         await new Promise((r) => setTimeout(r, 0));
       }
 
       // 5. Resize or Create Native Excel Table (ListObject) anchored at (startRow, startCol)
       try {
-        if (options.useExcelTable && !hasSubtotals && listObjectBodyRows > 0) {
+        if (options.useExcelTable && !hasSubtotals && !useMultiRowHeader && listObjectBodyRows > 0) {
           const fullRange = sheet.getRangeByIndexes(
             startRow,
             startCol,
@@ -1333,7 +1652,12 @@ export async function writeLookerDataToWorksheet(
         if (totalRows > 0) {
           for (let c = 0; c < colCount; c++) {
             if (expandedColumns[c]?.isRowTotal) {
-              const rtColRng = sheet.getRangeByIndexes(startRow + 1, startCol + c, totalRows, 1);
+              const rtColRng = sheet.getRangeByIndexes(
+                startRow + headerRowCount,
+                startCol + c,
+                totalRows,
+                1
+              );
               rtColRng.format.font.bold = true;
               rtColRng.format.fill.color = "#F8F9FA";
             }
@@ -1347,7 +1671,7 @@ export async function writeLookerDataToWorksheet(
           }
 
           for (const subRowIdx of matrix.subtotalRowIndices) {
-            const sheetRow = startRow + subRowIdx + 1;
+            const sheetRow = startRow + headerRowCount + subRowIdx;
             const subRng = sheet.getRangeByIndexes(sheetRow, startCol, 1, colCount);
             const treeNode = nodeByOffset.get(subRowIdx);
             subRng.format.font.bold = true;
@@ -1367,7 +1691,7 @@ export async function writeLookerDataToWorksheet(
             const rowCountGrp = grp.endRowOffset - grp.startRowOffset + 1;
             if (rowCountGrp > 0) {
               const grpRng = sheet.getRangeByIndexes(
-                startRow + grp.startRowOffset + 1,
+                startRow + headerRowCount + grp.startRowOffset,
                 startCol,
                 rowCountGrp,
                 colCount
@@ -1391,7 +1715,7 @@ export async function writeLookerDataToWorksheet(
               }
               if (state) {
                 const hideRng = sheet.getRangeByIndexes(
-                  startRow + 1 + runStart,
+                  startRow + headerRowCount + runStart,
                   startCol,
                   runEnd - runStart + 1,
                   colCount
@@ -1404,7 +1728,7 @@ export async function writeLookerDataToWorksheet(
         }
 
         if (matrix.grandTotalRowIndex !== null) {
-          const gtSheetRow = startRow + matrix.grandTotalRowIndex + 1;
+          const gtSheetRow = startRow + headerRowCount + matrix.grandTotalRowIndex;
           const gtRng = sheet.getRangeByIndexes(gtSheetRow, startCol, 1, colCount);
           gtRng.format.font.bold = true;
           gtRng.format.fill.color = "#E8F0FE";
@@ -1423,7 +1747,12 @@ export async function writeLookerDataToWorksheet(
           for (let c = 0; c < colCount; c++) {
             const fmt = expandedColumns[c]?.excelFormat;
             if (fmt) {
-              const colRange = sheet.getRangeByIndexes(startRow + 1, startCol + c, totalRows, 1);
+              const colRange = sheet.getRangeByIndexes(
+                startRow + headerRowCount,
+                startCol + c,
+                totalRows,
+                1
+              );
               colRange.numberFormat = [[fmt]];
             }
           }
@@ -1440,16 +1769,26 @@ export async function writeLookerDataToWorksheet(
           const fCol = savedFormulaCols[idx];
           try {
             const targetColIndex = startCol + colCount + fCol.offset;
-            const headerCell = sheet.getRangeByIndexes(startRow, targetColIndex, 1, 1);
+            const headerCell = sheet.getRangeByIndexes(
+              startRow + headerRowCount - 1,
+              targetColIndex,
+              1,
+              1
+            );
             headerCell.values = [[uniqueFormulaHeaders[idx]]];
 
-            const formulaOrigin = sheet.getRangeByIndexes(startRow + 1, targetColIndex, 1, 1);
+            const formulaOrigin = sheet.getRangeByIndexes(
+              startRow + headerRowCount,
+              targetColIndex,
+              1,
+              1
+            );
             formulaOrigin.formulas = [[fCol.formula]];
             await context.sync();
 
             if (formulaRowCount > 1) {
               const formulaTarget = sheet.getRangeByIndexes(
-                startRow + 1,
+                startRow + headerRowCount,
                 targetColIndex,
                 formulaRowCount,
                 1
@@ -1465,7 +1804,7 @@ export async function writeLookerDataToWorksheet(
 
             if (fCol.numberFormat) {
               const fmtRange = sheet.getRangeByIndexes(
-                startRow + 1,
+                startRow + headerRowCount,
                 targetColIndex,
                 formulaRowCount,
                 1
@@ -1481,7 +1820,7 @@ export async function writeLookerDataToWorksheet(
 
       // 8. Sampled Autofit (Top 150 rows) across Looker + formula columns
       try {
-        const sampleRows = Math.min(totalRows + 1, 150);
+        const sampleRows = Math.min(totalRows + headerRowCount, 150);
         const sampleRange = sheet.getRangeByIndexes(startRow, startCol, sampleRows, protectedCols);
         sampleRange.format.autofitColumns();
         await context.sync();
@@ -1519,6 +1858,7 @@ export async function writeLookerDataToWorksheet(
 async function syncTreeVisibilityToWorksheet(
   targetSheetId: string | undefined,
   anchorCell: string | undefined,
+  headerRowCount: number,
   totalRows: number,
   colCount: number,
   treeNodes: HierarchyTreeNodeMeta[],
@@ -1537,7 +1877,12 @@ async function syncTreeVisibilityToWorksheet(
 
     // 1. Update parent `▸` / `▾` cell labels in the Group column
     for (const node of treeNodes) {
-      const cell = sheet.getRangeByIndexes(startRow + 1 + node.rowOffset, startCol, 1, 1);
+      const cell = sheet.getRangeByIndexes(
+        startRow + headerRowCount + node.rowOffset,
+        startCol,
+        1,
+        1
+      );
       cell.values = [
         [
           formatTreeGroupCellLabel(
@@ -1561,7 +1906,7 @@ async function syncTreeVisibilityToWorksheet(
         runEnd++;
       }
       const rng = sheet.getRangeByIndexes(
-        startRow + 1 + runStart,
+        startRow + headerRowCount + runStart,
         startCol,
         runEnd - runStart + 1,
         Math.max(1, colCount)
@@ -1600,10 +1945,14 @@ export async function toggleWorksheetTreeNode(
     return null;
   }
   const { startRow, startCol } = parseCellAddress(options.anchorCell);
-  if (clickedSheetCol0Based !== startCol || clickedSheetRow0Based < startRow + 1) {
+  const headerRowCount =
+    options.useMultiRowCrosstabHeader && options.pivots && options.pivots.length > 0
+      ? options.pivots.length + 1
+      : 1;
+  if (clickedSheetCol0Based !== startCol || clickedSheetRow0Based < startRow + headerRowCount) {
     return null;
   }
-  const clickedOffset = clickedSheetRow0Based - (startRow + 1);
+  const clickedOffset = clickedSheetRow0Based - (startRow + headerRowCount);
   const targetIdx = options.treeNodes.findIndex((n) => n.rowOffset === clickedOffset);
   if (targetIdx === -1) {
     return null;
@@ -1617,6 +1966,7 @@ export async function toggleWorksheetTreeNode(
   await syncTreeVisibilityToWorksheet(
     targetSheetId,
     options.anchorCell,
+    headerRowCount,
     totalRows,
     colCount,
     updatedNodes,
@@ -1641,6 +1991,10 @@ export async function applyWorksheetTreeDisplayLevel(
   if (!options.enableRowGroups || !options.treeNodes || options.treeNodes.length === 0) {
     return null;
   }
+  const headerRowCount =
+    options.useMultiRowCrosstabHeader && options.pivots && options.pivots.length > 0
+      ? options.pivots.length + 1
+      : 1;
   const maxVisibleLevel = getMaxVisibleLevel(displayLevel);
   const updatedNodes = options.treeNodes.map((n) => ({
     ...n,
@@ -1651,6 +2005,7 @@ export async function applyWorksheetTreeDisplayLevel(
   await syncTreeVisibilityToWorksheet(
     targetSheetId,
     options.anchorCell,
+    headerRowCount,
     totalRows,
     colCount,
     updatedNodes,
