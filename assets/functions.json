@@ -1,0 +1,81 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/office-js/custom-functions.schema.json",
+  "functions": [
+    {
+      "id": "VALUE",
+      "name": "VALUE",
+      "description": "Evaluates a single governed Looker metric (supporting non-additive measures like count_distinct and ratios) with automatic micro-batching.",
+      "parameters": [
+        {
+          "name": "model",
+          "description": "LookML Model name (e.g. 'thelook')",
+          "type": "string"
+        },
+        {
+          "name": "explore",
+          "description": "Explore name (e.g. 'order_items')",
+          "type": "string"
+        },
+        {
+          "name": "measure",
+          "description": "LookML Measure name (e.g. 'order_items.total_revenue')",
+          "type": "string"
+        },
+        {
+          "name": "filters",
+          "description": "Optional filter field/value pairs (e.g. 'orders.region', B5) or 'field=val;field2=val2'",
+          "type": "any",
+          "optional": true,
+          "repeating": true
+        }
+      ],
+      "result": {
+        "type": "any"
+      }
+    },
+    {
+      "id": "QUERY",
+      "name": "QUERY",
+      "description": "Executes a Looker semantic query and spills a 2D array (headers + rows) directly into the worksheet.",
+      "parameters": [
+        {
+          "name": "model",
+          "description": "LookML Model name",
+          "type": "string"
+        },
+        {
+          "name": "explore",
+          "description": "Explore name",
+          "type": "string"
+        },
+        {
+          "name": "fieldsCsv",
+          "description": "Comma-separated list of LookML fields",
+          "type": "string"
+        },
+        {
+          "name": "filters",
+          "description": "Optional filter string ('field=val;field2=val2'), JSON, or 2-column cell range",
+          "type": "any",
+          "optional": true
+        },
+        {
+          "name": "sortsCsv",
+          "description": "Optional comma-separated sort specifications",
+          "type": "string",
+          "optional": true
+        },
+        {
+          "name": "limit",
+          "description": "Optional row limit (default 500)",
+          "type": "any",
+          "optional": true
+        }
+      ],
+      "result": {
+        "type": "any",
+        "dimensionality": "matrix"
+      }
+    }
+  ]
+}

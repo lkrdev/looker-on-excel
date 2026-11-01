@@ -3,8 +3,11 @@ import { createRoot } from "react-dom/client";
 import { FluentProvider } from "@fluentui/react-components";
 import { lookerLightTheme } from "./theme/lookerTheme";
 import { App } from "./components/App";
+import { registerLookerCustomFunctions } from "../functions/functions";
 
-Office.onReady((info) => {
+Office.onReady(() => {
+  registerLookerCustomFunctions();
+
   const container = document.getElementById("root");
   if (!container) return;
 
