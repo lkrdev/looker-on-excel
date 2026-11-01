@@ -67,6 +67,7 @@ export interface LookerWriteQuery {
   view: string;
   fields?: string[] | null;
   pivots?: string[] | null;
+  fill_fields?: string[] | null;
   filters?: Record<string, string> | null;
   sorts?: string[] | null;
   limit?: string | null;
@@ -144,6 +145,10 @@ export function convertWriteQueryToPayload(wq: LookerWriteQuery): QueryPayload {
     sorts: Array.isArray(wq.sorts) ? wq.sorts : [],
     limit: wq.limit || "500",
     pivots: Array.isArray(wq.pivots) && wq.pivots.length > 0 ? wq.pivots : null,
+    fill_fields:
+      Array.isArray(wq.fill_fields) && wq.fill_fields.length > 0
+        ? wq.fill_fields
+        : undefined,
     total: wq.total ? true : undefined,
     row_total:
       wq.row_total === "right" || wq.row_total === "left" ? wq.row_total : undefined,
@@ -419,7 +424,7 @@ export async function getLook(
   lookId: string
 ): Promise<LookDetail> {
   const fields =
-    "id,title,description,query(model,view,fields,pivots,filters,sorts,limit,total,row_total,subtotals)";
+    "id,title,description,query(model,view,fields,pivots,fill_fields,filters,sorts,limit,total,row_total,subtotals)";
   const url = `${baseUrl.replace(/\/$/, "")}/api/4.0/looks/${encodeURIComponent(lookId)}?fields=${encodeURIComponent(fields)}`;
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },
@@ -458,7 +463,7 @@ export async function getDashboard(
   dashboardId: string
 ): Promise<DashboardDetail> {
   const fields =
-    "id,title,description,dashboard_filters(id,name,title,type,default_value,dimension),dashboard_elements(id,title,type,query(model,view,fields,pivots,filters,sorts,limit,total,row_total,subtotals),result_maker(query(model,view,fields,pivots,filters,sorts,limit,total,row_total,subtotals),filterables(listen)))";
+    "id,title,description,dashboard_filters(id,name,title,type,default_value,dimension),dashboard_elements(id,title,type,query(model,view,fields,pivots,fill_fields,filters,sorts,limit,total,row_total,subtotals),result_maker(query(model,view,fields,pivots,fill_fields,filters,sorts,limit,total,row_total,subtotals),filterables(listen)))";
   const url = `${baseUrl.replace(/\/$/, "")}/api/4.0/dashboards/${encodeURIComponent(dashboardId)}?fields=${encodeURIComponent(fields)}`;
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },
