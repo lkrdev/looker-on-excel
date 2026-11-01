@@ -38,11 +38,14 @@ import { runQueryTask, QueryTaskController, QueryPayload } from "../services/que
 import {
   writeLookerDataToWorksheet,
   expandPivotedColumns,
+  formatCellAddress,
   ColumnDefinition,
   WriteOptions,
 } from "../services/excelWriter";
 import {
   getActiveSheetInfo,
+  getActiveCellAddress,
+  getSiblingTableBoundingBoxes,
   saveSheetMetadata,
   getAllWorkbookLookerSheets,
   StoredSheetConfig,
@@ -74,6 +77,7 @@ export const App: React.FC = () => {
   // View state: 'builder' | 'refresh'
   const [activeView, setActiveView] = useState<"builder" | "refresh">("builder");
   const [sheetConfig, setSheetConfig] = useState<StoredSheetConfig | null>(null);
+  const [allSheetTables, setAllSheetTables] = useState<StoredSheetConfig[]>([]);
   const [sourceSheetId, setSourceSheetId] = useState<string | null>(null);
 
   // Catalog state
@@ -102,6 +106,7 @@ export const App: React.FC = () => {
     includeTotals: false,
     includeRowTotals: false,
     includeSubtotals: false,
+    anchorCell: "A1",
   });
 
   // Execution & Progress state
@@ -114,6 +119,7 @@ export const App: React.FC = () => {
   const activeTaskRef = useRef<QueryTaskController | null>(null);
   const lastActiveSheetIdRef = useRef<string | null>(null);
   const sourceSheetIdRef = useRef<string | null>(null);
+  const preferredTableIdRef = useRef<string | null>(null);
   const skipDefaultPromptsRef = useRef<boolean>(false);
 
   // Validate / refresh token on taskpane mount / relaunch of Excel
@@ -129,18 +135,29 @@ export const App: React.FC = () => {
     }
   }, []);
 
-  // Check active sheet metadata; only switch activeView when the effective Looker source sheet changes
+  // Check active sheet metadata; also hit-test which table on a multi-table sheet contains the active cell
   const checkSheetMetadata = useCallback(async (forceViewSync: boolean = false) => {
     const {
       activeSheetId,
       sourceSheetId: resolvedSourceId,
       config,
+      allSheetTables: resolvedTables,
       isPivotSheet,
-    } = await getActiveSheetInfo(sourceSheetIdRef.current);
+    } = await getActiveSheetInfo(sourceSheetIdRef.current, preferredTableIdRef.current);
 
     const activeChanged =
       activeSheetId !== null && activeSheetId !== lastActiveSheetIdRef.current;
     const sourceChanged = resolvedSourceId !== sourceSheetIdRef.current;
+
+    if (activeChanged) {
+      preferredTableIdRef.current = null;
+    }
+
+    setAllSheetTables(resolvedTables || []);
+    if (config) {
+      setSheetConfig(config);
+      preferredTableIdRef.current = config.tableId || null;
+    }
 
     if (forceViewSync || activeChanged || lastActiveSheetIdRef.current === null) {
       lastActiveSheetIdRef.current = activeSheetId;
@@ -148,7 +165,6 @@ export const App: React.FC = () => {
       setSourceSheetId(resolvedSourceId);
       setSheetConfig(config);
 
-      // Switch view on initial load, forced sync, or when switching between different Looker source sheets
       if (forceViewSync || sourceChanged || !isPivotSheet) {
         setActiveView(config ? "refresh" : "builder");
       }
@@ -330,7 +346,11 @@ export const App: React.FC = () => {
     setPivots(config.queryPayload.pivots || []);
     setRowLimit(config.queryPayload.limit || "5000");
     if (config.options) {
-      setTableOptions(config.options);
+      setTableOptions({
+        ...config.options,
+        anchorCell: config.anchorCell || config.options.anchorCell || "A1",
+        tableId: config.tableId || config.options.tableId,
+      });
       setDestination("active");
     }
 
@@ -371,13 +391,43 @@ export const App: React.FC = () => {
   const handleStartNewQuery = () => {
     setSheetConfig(null);
     sourceSheetIdRef.current = null;
+    preferredTableIdRef.current = null;
     setSourceSheetId(null);
     setSelectedFields([]);
     setSorts([]);
     setPivots([]);
     setFilters([]);
     setPromptValues({});
+    setTableOptions((prev) => ({ ...prev, anchorCell: "A1", tableId: undefined }));
     setDestination("new");
+    setActiveView("builder");
+  };
+
+  // Add another table onto the current worksheet at the user's selected cell (or next available column)
+  const handleAddTableToSheet = async () => {
+    const selectedAddr = await getActiveCellAddress();
+    let suggestedAnchor = selectedAddr || "H1";
+    const existingAnchors = new Set(
+      allSheetTables.map((t) => (t.anchorCell || t.options?.anchorCell || "A1").toUpperCase())
+    );
+    if (existingAnchors.has(suggestedAnchor.toUpperCase())) {
+      const maxEndCol = allSheetTables.reduce((maxC, t) => Math.max(maxC, t.endCol ?? 4), 0);
+      suggestedAnchor = formatCellAddress(0, maxEndCol + 2);
+    }
+
+    setSheetConfig(null);
+    preferredTableIdRef.current = null;
+    setSelectedFields([]);
+    setSorts([]);
+    setPivots([]);
+    setFilters([]);
+    setPromptValues({});
+    setDestination("active");
+    setTableOptions((prev) => ({
+      ...prev,
+      anchorCell: suggestedAnchor,
+      tableId: `Looker_${suggestedAnchor}`,
+    }));
     setActiveView("builder");
   };
 
@@ -525,9 +575,22 @@ export const App: React.FC = () => {
 
       const targetSheetId =
         destination === "active" && sourceSheetId ? sourceSheetId : undefined;
+      const effectiveAnchor =
+        destination === "new" ? "A1" : (tableOptions.anchorCell || "A1").toUpperCase();
+      const effectiveTableId =
+        destination === "new"
+          ? "Looker_A1"
+          : tableOptions.tableId || sheetConfig?.tableId || `Looker_${effectiveAnchor}`;
+      const siblingRanges =
+        destination === "active"
+          ? getSiblingTableBoundingBoxes(allSheetTables, effectiveTableId, effectiveAnchor)
+          : [];
 
       const writeOptions: WriteOptions = {
         ...tableOptions,
+        anchorCell: effectiveAnchor,
+        tableId: effectiveTableId,
+        siblingTableRanges: siblingRanges,
         destination,
         targetSheetId,
         sheetName: exploreDetail.label || selectedExplore || "Looker Data",
@@ -556,12 +619,15 @@ export const App: React.FC = () => {
 
       // 5. Persist metadata for one-click refresh on the actual Looker data worksheet
       const config: StoredSheetConfig = {
+        tableId: effectiveTableId,
+        anchorCell: effectiveAnchor,
         queryPayload,
         columns,
         options: {
           ...writeOptions,
           totalsData: undefined,
           subtotalsData: undefined,
+          siblingTableRanges: undefined,
           destination: "active",
           targetSheetId: undefined,
           prevRowCount: totalWrittenDataRows,
@@ -575,6 +641,7 @@ export const App: React.FC = () => {
         promptValues,
       };
       await saveSheetMetadata(config, writtenSheetId || targetSheetId);
+      preferredTableIdRef.current = effectiveTableId;
       if (writtenSheetId) {
         sourceSheetIdRef.current = writtenSheetId;
         setSourceSheetId(writtenSheetId);
@@ -588,7 +655,7 @@ export const App: React.FC = () => {
     }
   };
 
-  // Re-run Refresh on active (or source) Looker sheet
+  // Re-run Refresh on active (or source) Looker table
   const handleRefreshActive = async () => {
     if (!auth || !sheetConfig) return;
 
@@ -623,12 +690,28 @@ export const App: React.FC = () => {
         Boolean(sheetConfig.queryPayload.row_total)
       ).expandedColumns.length;
 
+      const effectiveAnchor = (
+        sheetConfig.anchorCell ||
+        sheetConfig.options?.anchorCell ||
+        "A1"
+      ).toUpperCase();
+      const effectiveTableId =
+        sheetConfig.tableId || sheetConfig.options?.tableId || `Looker_${effectiveAnchor}`;
+      const siblingRanges = getSiblingTableBoundingBoxes(
+        allSheetTables,
+        effectiveTableId,
+        effectiveAnchor
+      );
+
       setStatusText(`Writing ${dataRows.length.toLocaleString()} rows...`);
       const writtenSheetId = await writeLookerDataToWorksheet(
         sheetConfig.columns,
         dataRows,
         {
           ...sheetConfig.options,
+          anchorCell: effectiveAnchor,
+          tableId: effectiveTableId,
+          siblingTableRanges: siblingRanges,
           destination: "active",
           targetSheetId: sourceSheetId || undefined,
           pivots: activePivots,
@@ -647,8 +730,12 @@ export const App: React.FC = () => {
 
       const updatedConfig: StoredSheetConfig = {
         ...sheetConfig,
+        tableId: effectiveTableId,
+        anchorCell: effectiveAnchor,
         options: {
           ...sheetConfig.options,
+          anchorCell: effectiveAnchor,
+          tableId: effectiveTableId,
           destination: "active",
           targetSheetId: undefined,
           prevRowCount: totalWrittenDataRows,
@@ -657,7 +744,11 @@ export const App: React.FC = () => {
         lastRefreshed: new Date().toISOString(),
         rowCount: totalWrittenDataRows,
       };
-      await saveSheetMetadata(updatedConfig, writtenSheetId || sourceSheetId || undefined);
+      const updatedTables = await saveSheetMetadata(
+        updatedConfig,
+        writtenSheetId || sourceSheetId || undefined
+      );
+      setAllSheetTables(updatedTables);
       setSheetConfig(updatedConfig);
     } catch (err: any) {
       setErrorMessage(err.message || "Failed to refresh data.");
@@ -667,7 +758,7 @@ export const App: React.FC = () => {
     }
   };
 
-  // Global "Refresh All" across workbook
+  // Global "Refresh All" across workbook (including all tables on multi-table sheets)
   const handleRefreshAll = async () => {
     if (!auth) return;
     setRefreshingAll(true);
@@ -695,11 +786,27 @@ export const App: React.FC = () => {
           Boolean(s.config.queryPayload.row_total)
         ).expandedColumns.length;
 
+        const effectiveAnchor = (
+          s.config.anchorCell ||
+          s.config.options?.anchorCell ||
+          "A1"
+        ).toUpperCase();
+        const effectiveTableId =
+          s.config.tableId || s.config.options?.tableId || `Looker_${effectiveAnchor}`;
+        const siblingRanges = getSiblingTableBoundingBoxes(
+          s.allTables || [],
+          effectiveTableId,
+          effectiveAnchor
+        );
+
         await writeLookerDataToWorksheet(
           s.config.columns,
           dataRows,
           {
             ...s.config.options,
+            anchorCell: effectiveAnchor,
+            tableId: effectiveTableId,
+            siblingTableRanges: siblingRanges,
             destination: "active",
             targetSheetId: s.sheetId,
             pivots: sPivots,
@@ -719,8 +826,12 @@ export const App: React.FC = () => {
         await saveSheetMetadata(
           {
             ...s.config,
+            tableId: effectiveTableId,
+            anchorCell: effectiveAnchor,
             options: {
               ...s.config.options,
+              anchorCell: effectiveAnchor,
+              tableId: effectiveTableId,
               destination: "active",
               prevRowCount: totalWrittenDataRows,
               prevColCount: expandedColCount,
@@ -779,6 +890,12 @@ export const App: React.FC = () => {
       ) : activeView === "refresh" && sheetConfig ? (
         <RefreshView
           config={sheetConfig}
+          allSheetTables={allSheetTables}
+          onSelectTable={(tbl) => {
+            preferredTableIdRef.current = tbl.tableId || null;
+            setSheetConfig(tbl);
+          }}
+          onAddTableToSheet={handleAddTableToSheet}
           onRefresh={handleRefreshActive}
           onCancel={handleCancelQuery}
           onEdit={() => handleEditQuery(sheetConfig)}

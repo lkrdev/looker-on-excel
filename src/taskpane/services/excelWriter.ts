@@ -7,6 +7,13 @@ export interface ColumnDefinition {
   isRowTotal?: boolean;
 }
 
+export interface BoundingBox {
+  top: number;
+  bottom: number;
+  left: number;
+  right: number;
+}
+
 export interface WriteOptions {
   useExcelTable?: boolean;
   tableStyle?: string;
@@ -25,6 +32,61 @@ export interface WriteOptions {
   includeSubtotals?: boolean;
   totalsData?: Record<string, any> | null;
   subtotalsData?: Record<string, Record<string, any>[]> | null;
+  anchorCell?: string;
+  tableId?: string;
+  siblingTableRanges?: BoundingBox[];
+}
+
+/**
+ * Converts an Excel A1-style cell reference (e.g. "A1", "B4", "$H$12", "Sheet1!C5")
+ * into 0-based { startRow, startCol } coordinates.
+ */
+export function parseCellAddress(address?: string | null): { startRow: number; startCol: number } {
+  if (!address || typeof address !== "string") {
+    return { startRow: 0, startCol: 0 };
+  }
+  const bangIdx = address.lastIndexOf("!");
+  const clean = (bangIdx >= 0 ? address.slice(bangIdx + 1) : address)
+    .split(":")[0]
+    .replace(/\$/g, "")
+    .trim()
+    .toUpperCase();
+
+  const match = /^([A-Z]+)(\d+)$/.exec(clean);
+  if (!match) {
+    return { startRow: 0, startCol: 0 };
+  }
+
+  const colLetters = match[1];
+  const rowNum = parseInt(match[2], 10);
+  if (!Number.isFinite(rowNum) || rowNum < 1) {
+    return { startRow: 0, startCol: 0 };
+  }
+
+  let colIdx = 0;
+  for (let i = 0; i < colLetters.length; i++) {
+    colIdx = colIdx * 26 + (colLetters.charCodeAt(i) - 64);
+  }
+
+  return {
+    startRow: rowNum - 1,
+    startCol: Math.max(0, colIdx - 1),
+  };
+}
+
+/**
+ * Converts 0-based (rowIndex, colIndex) into an Excel A1 cell reference (e.g., (3, 1) -> "B4").
+ */
+export function formatCellAddress(rowIndex: number, colIndex: number): string {
+  let c = Math.max(0, Math.floor(colIndex)) + 1;
+  let letters = "";
+  while (c > 0) {
+    const rem = (c - 1) % 26;
+    letters = String.fromCharCode(65 + rem) + letters;
+    c = Math.floor((c - 1) / 26);
+  }
+  const r = Math.max(0, Math.floor(rowIndex)) + 1;
+  return `${letters}${r}`;
 }
 
 export function calculateBatchSize(colCount: number, targetCellBudget: number = 35000): number {
@@ -83,7 +145,6 @@ export function expandPivotedColumns(
     };
   }
 
-  // Scan rows to find which columns are pivoted measures and collect discovered pivot dimension keys
   const pivotedColSample = new Map<string, Record<string, any>>();
   const discoveredPivotDims = new Set<string>(pivots || []);
 
@@ -120,7 +181,6 @@ export function expandPivotedColumns(
   >();
 
   columns.forEach((col) => {
-    // Skip columns that are pivoted dimensions (since their values become column headers)
     if (discoveredPivotDims.has(col.fieldKey)) {
       return;
     }
@@ -130,7 +190,6 @@ export function expandPivotedColumns(
       const pivotFields = Object.keys(val).filter((pf) => pf !== "$$$_row_total_$$$");
       const pivotField = pivotFields[0];
 
-      // Discover all unique pivot values across all dataRows in order, plus check if $$$_row_total_$$$ exists
       const seenPivotVals = new Set<string>();
       let hasRowTotalInRows = Boolean(includeRowTotals);
 
@@ -182,7 +241,6 @@ export function expandPivotedColumns(
         });
       }
     } else {
-      // Standard dimension/measure column
       expandedColumns.push(col);
     }
   });
@@ -208,9 +266,9 @@ export function expandPivotedColumns(
 
 export interface WorksheetRowMatrixResult {
   rows: Record<string, any>[];
-  subtotalRowIndices: number[]; // 0-based indices into `rows`
-  grandTotalRowIndex: number | null; // 0-based index into `rows`
-  outlineGroups: Array<{ startRowOffset: number; endRowOffset: number }>; // 0-based inclusive offsets into `rows`
+  subtotalRowIndices: number[];
+  grandTotalRowIndex: number | null;
+  outlineGroups: Array<{ startRowOffset: number; endRowOffset: number }>;
 }
 
 /**
@@ -251,7 +309,6 @@ export function buildWorksheetRowMatrix(
 
       if (currentVal !== nextVal) {
         const groupEndOffset = outRows.length - 1;
-        // Find matching subtotal row from Looker's subtotalsData
         const matchingSubtotal = allSubtotalRows.find(
           (sr) =>
             sr[primaryDimKey] === currentVal &&
@@ -308,14 +365,16 @@ export function buildWorksheetRowMatrix(
 }
 
 /**
- * Calculates residual ranges that must be cleared when a new query has fewer rows
- * or fewer columns than the previously populated range.
+ * Calculates residual ranges (anchored at startRow, startCol) that must be cleared when
+ * a refreshed query has fewer rows or fewer columns than its previous run.
  */
 export function computeResidualRanges(
   prevRows: number,
   prevCols: number,
   newRows: number,
-  newCols: number
+  newCols: number,
+  startRow: number = 0,
+  startCol: number = 0
 ): {
   extraColRange: { startRow: number; startCol: number; rowCount: number; colCount: number } | null;
   extraRowRange: { startRow: number; startCol: number; rowCount: number; colCount: number } | null;
@@ -323,8 +382,8 @@ export function computeResidualRanges(
   const extraColRange =
     prevCols > newCols
       ? {
-          startRow: 0,
-          startCol: newCols,
+          startRow,
+          startCol: startCol + newCols,
           rowCount: Math.max(prevRows, newRows),
           colCount: prevCols - newCols,
         }
@@ -333,8 +392,8 @@ export function computeResidualRanges(
   const extraRowRange =
     prevRows > newRows
       ? {
-          startRow: newRows,
-          startCol: 0,
+          startRow: startRow + newRows,
+          startCol,
           rowCount: prevRows - newRows,
           colCount: Math.max(newCols, prevCols),
         }
@@ -356,6 +415,7 @@ export async function writeLookerDataToWorksheet(
   options: WriteOptions,
   onProgress: (percent: number, currentRow: number) => void
 ): Promise<string> {
+  const { startRow, startCol } = parseCellAddress(options.anchorCell);
   const matrix = buildWorksheetRowMatrix(
     columns,
     dataRows,
@@ -403,7 +463,6 @@ export async function writeLookerDataToWorksheet(
     let sheet: Excel.Worksheet;
     let isCreatingNewSheet = options.destination === "new" && !options.targetSheetId;
 
-    // Resolve target worksheet based on targetSheetId or destination option
     if (options.targetSheetId) {
       const candidate = context.workbook.worksheets.getItemOrNullObject(options.targetSheetId);
       candidate.load(["id", "isNullObject"]);
@@ -444,17 +503,21 @@ export async function writeLookerDataToWorksheet(
     }
 
     try {
-      // 2. Inspect existing Looker table & PivotTables on this sheet.
+      // 2. Inspect existing Looker table (matching tableId or startRow/startCol) & PivotTables on this sheet
       let prevTotalRows = options.prevRowCount ? options.prevRowCount + 1 : 0;
       let prevTotalCols = options.prevColCount || 0;
       let existingTable: Excel.Table | null = null;
-      let savedTableName: string | null = null;
-      let pivotRanges: Array<{ top: number; bottom: number; left: number; right: number }> = [];
+      let savedTableName: string | null = options.tableId || null;
+      let pivotRanges: BoundingBox[] = [...(options.siblingTableRanges || [])];
 
-      // Clear any previous row outline groupings before writing new data
       if (!isCreatingNewSheet && prevTotalRows > 1) {
         try {
-          const prevDataRng = sheet.getRangeByIndexes(1, 0, prevTotalRows, Math.max(1, prevTotalCols));
+          const prevDataRng = sheet.getRangeByIndexes(
+            startRow + 1,
+            startCol,
+            prevTotalRows,
+            Math.max(1, prevTotalCols)
+          );
           prevDataRng.ungroup(Excel.GroupOption.byRows);
           await context.sync();
         } catch {
@@ -477,27 +540,45 @@ export async function writeLookerDataToWorksheet(
               return rng;
             });
             await context.sync();
-            pivotRanges = pLayouts.map((r) => ({
-              top: r.rowIndex,
-              bottom: r.rowIndex + r.rowCount - 1,
-              left: r.columnIndex,
-              right: r.columnIndex + r.columnCount - 1,
-            }));
+            pivotRanges.push(
+              ...pLayouts.map((r) => ({
+                top: r.rowIndex,
+                bottom: r.rowIndex + r.rowCount - 1,
+                left: r.columnIndex,
+                right: r.columnIndex + r.columnCount - 1,
+              }))
+            );
           }
 
           if (existingTables.items.length > 0) {
-            existingTable = existingTables.items[0];
-            savedTableName = existingTable.name;
-            const tableRange = existingTable.getRange();
-            tableRange.load(["rowIndex", "rowCount", "columnIndex", "columnCount"]);
+            const tableRanges = existingTables.items.map((tbl) => {
+              const rng = tbl.getRange();
+              rng.load(["rowIndex", "rowCount", "columnIndex", "columnCount"]);
+              return { tbl, rng };
+            });
             await context.sync();
 
-            prevTotalRows = Math.max(prevTotalRows, tableRange.rowIndex + tableRange.rowCount);
-            prevTotalCols = Math.max(prevTotalCols, tableRange.columnIndex + tableRange.columnCount);
+            for (const { tbl, rng } of tableRanges) {
+              const matchesById = options.tableId && tbl.name === options.tableId;
+              const matchesByAnchor = rng.rowIndex === startRow && rng.columnIndex === startCol;
 
-            // Convert to range if user unchecked "Create Native Excel Table" OR if Looker Subtotals
-            // with row outline grouping are enabled (Excel prevents grouping rows inside a ListObject).
-            if (!options.useExcelTable || hasSubtotals) {
+              if (matchesById || matchesByAnchor) {
+                existingTable = tbl;
+                savedTableName = tbl.name;
+                prevTotalRows = Math.max(prevTotalRows, rng.rowCount);
+                prevTotalCols = Math.max(prevTotalCols, rng.columnCount);
+              } else {
+                // Protect other Excel Tables on the same worksheet from being overwritten or cleared
+                pivotRanges.push({
+                  top: rng.rowIndex,
+                  bottom: rng.rowIndex + rng.rowCount - 1,
+                  left: rng.columnIndex,
+                  right: rng.columnIndex + rng.columnCount - 1,
+                });
+              }
+            }
+
+            if (existingTable && (!options.useExcelTable || hasSubtotals)) {
               existingTable.convertToRange();
               existingTable = null;
               await context.sync();
@@ -508,24 +589,26 @@ export async function writeLookerDataToWorksheet(
         }
       }
 
-      const overlapsPivotTable = (
-        startRow: number,
-        startCol: number,
+      const overlapsProtectedRange = (
+        r0: number,
+        c0: number,
         rowCount: number,
         colCount: number
       ): boolean => {
-        const r1 = startRow + rowCount - 1;
-        const c1 = startCol + colCount - 1;
+        const r1 = r0 + rowCount - 1;
+        const c1 = c0 + colCount - 1;
         return pivotRanges.some(
-          (p) => !(r1 < p.top || startRow > p.bottom || c1 < p.left || startCol > p.right)
+          (p) => !(r1 < p.top || r0 > p.bottom || c1 < p.left || c0 > p.right)
         );
       };
 
-      // 2.2 Guard against writing onto a PivotTable worksheet
+      // 2.2 Guard against writing onto a PivotTable-only worksheet when anchor is A1
       if (
         !isCreatingNewSheet &&
         !existingTable &&
-        overlapsPivotTable(0, 0, Math.max(1, totalRows + 1), colCount)
+        startRow === 0 &&
+        startCol === 0 &&
+        overlapsProtectedRange(startRow, startCol, Math.max(1, totalRows + 1), colCount)
       ) {
         const allSheets = context.workbook.worksheets;
         allSheets.load(["items/id", "items/name"]);
@@ -543,21 +626,21 @@ export async function writeLookerDataToWorksheet(
         await context.sync();
 
         const sourceMatch = propLookups.find(({ props }) =>
-          props.items.some((p) => p.key === "looker_query_config")
+          props.items.some((p) => p.key === "looker_query_config" || p.key === "looker_tables_v2")
         );
 
         if (sourceMatch) {
           sheet = sourceMatch.s;
           writtenSheetId = sheet.id;
-          pivotRanges = [];
+          pivotRanges = [...(options.siblingTableRanges || [])];
           if (sourceMatch.tbls.items.length > 0) {
             existingTable = sourceMatch.tbls.items[0];
             savedTableName = existingTable.name;
             const tableRange = existingTable.getRange();
             tableRange.load(["rowIndex", "rowCount", "columnIndex", "columnCount"]);
             await context.sync();
-            prevTotalRows = Math.max(prevTotalRows, tableRange.rowIndex + tableRange.rowCount);
-            prevTotalCols = Math.max(prevTotalCols, tableRange.columnIndex + tableRange.columnCount);
+            prevTotalRows = Math.max(prevTotalRows, tableRange.rowCount);
+            prevTotalCols = Math.max(prevTotalCols, tableRange.columnCount);
           }
         } else {
           sheet = await createNewLookerSheet();
@@ -575,40 +658,41 @@ export async function writeLookerDataToWorksheet(
         try {
           if (options.prevColCount && options.prevColCount > 0 && options.prevColCount !== colCount) {
             const deltaCols = colCount - options.prevColCount;
-            const checkFormulaCell = sheet.getRangeByIndexes(1, options.prevColCount, 1, 1);
+            const boundaryCol = startCol + options.prevColCount;
+            const checkFormulaCell = sheet.getRangeByIndexes(startRow + 1, boundaryCol, 1, 1);
             checkFormulaCell.load(["formulas"]);
             await context.sync();
             const hasFormulaAtPrevBoundary =
               typeof checkFormulaCell.formulas?.[0]?.[0] === "string" &&
               checkFormulaCell.formulas[0][0].startsWith("=");
-            const hasPivotToRight = pivotRanges.some((p) => p.left >= options.prevColCount!);
+            const hasProtectedToRight = pivotRanges.some((p) => p.left >= boundaryCol);
 
             if (
               deltaCols > 0 &&
               (hasFormulaAtPrevBoundary ||
-                overlapsPivotTable(
-                  0,
-                  options.prevColCount,
+                overlapsProtectedRange(
+                  startRow,
+                  boundaryCol,
                   Math.max(prevTotalRows, totalRows + 1),
                   deltaCols
                 ))
             ) {
               const insertColRng = sheet
-                .getRangeByIndexes(0, options.prevColCount, 1, deltaCols)
+                .getRangeByIndexes(startRow, boundaryCol, 1, deltaCols)
                 .getEntireColumn();
               insertColRng.insert(Excel.InsertShiftDirection.right);
               await context.sync();
               prevTotalCols += deltaCols;
               pivotRanges = pivotRanges.map((p) =>
-                p.left >= options.prevColCount!
+                p.left >= boundaryCol
                   ? { ...p, left: p.left + deltaCols, right: p.right + deltaCols }
                   : p
               );
-            } else if (deltaCols < 0 && hasFormulaAtPrevBoundary && !hasPivotToRight) {
+            } else if (deltaCols < 0 && hasFormulaAtPrevBoundary && !hasProtectedToRight) {
               const colsToRemove = Math.abs(deltaCols);
-              if (!overlapsPivotTable(0, colCount, prevTotalRows, colsToRemove)) {
+              if (!overlapsProtectedRange(startRow, startCol + colCount, prevTotalRows, colsToRemove)) {
                 const deleteColRng = sheet
-                  .getRangeByIndexes(0, colCount, 1, colsToRemove)
+                  .getRangeByIndexes(startRow, startCol + colCount, 1, colsToRemove)
                   .getEntireColumn();
                 deleteColRng.delete(Excel.DeleteShiftDirection.left);
                 await context.sync();
@@ -618,12 +702,17 @@ export async function writeLookerDataToWorksheet(
           }
 
           if (options.autoExpandFormulas) {
-            const scanRange = sheet.getRangeByIndexes(0, colCount, 2, maxFormulaColsToScan);
+            const scanRange = sheet.getRangeByIndexes(
+              startRow,
+              startCol + colCount,
+              2,
+              maxFormulaColsToScan
+            );
             scanRange.load(["formulas", "values", "numberFormat"]);
             await context.sync();
 
             for (let offset = 0; offset < maxFormulaColsToScan; offset++) {
-              if (overlapsPivotTable(0, colCount + offset, 2, 1)) {
+              if (overlapsProtectedRange(startRow, startCol + colCount + offset, 2, 1)) {
                 break;
               }
               const formulaCell = scanRange.formulas?.[1]?.[offset];
@@ -666,7 +755,7 @@ export async function writeLookerDataToWorksheet(
         try {
           const shrinkRows = Math.min(prevTotalRows, listObjectBodyRows + 1);
           const shrinkCols = Math.min(prevTotalCols, protectedCols);
-          const shrinkRange = sheet.getRangeByIndexes(0, 0, shrinkRows, shrinkCols);
+          const shrinkRange = sheet.getRangeByIndexes(startRow, startCol, shrinkRows, shrinkCols);
           existingTable.resize(shrinkRange);
           await context.sync();
         } catch (e) {
@@ -674,18 +763,20 @@ export async function writeLookerDataToWorksheet(
         }
       }
 
-      // 2.8 Clear residual rows and columns from previous larger runs
+      // 2.8 Clear residual rows and columns from previous larger runs (anchored at startRow, startCol)
       if (!isCreatingNewSheet && (prevTotalRows > 0 || prevTotalCols > 0)) {
         const { extraColRange, extraRowRange } = computeResidualRanges(
           prevTotalRows,
           prevTotalCols,
           totalRows + 1,
-          protectedCols
+          protectedCols,
+          startRow,
+          startCol
         );
 
         if (
           extraColRange &&
-          !overlapsPivotTable(
+          !overlapsProtectedRange(
             extraColRange.startRow,
             extraColRange.startCol,
             extraColRange.rowCount,
@@ -708,7 +799,7 @@ export async function writeLookerDataToWorksheet(
 
         if (
           extraRowRange &&
-          !overlapsPivotTable(
+          !overlapsProtectedRange(
             extraRowRange.startRow,
             extraRowRange.startCol,
             extraRowRange.rowCount,
@@ -730,7 +821,7 @@ export async function writeLookerDataToWorksheet(
         }
       }
 
-      // 3. Write Header
+      // 3. Write Header at (startRow, startCol)
       const seenHeaders = new Map<string, number>();
       const deduplicateHeader = (raw: string): string => {
         const base = (raw || "Column").trim();
@@ -747,22 +838,22 @@ export async function writeLookerDataToWorksheet(
       );
 
       const allHeaderLabels = [...uniqueHeaderLabels, ...uniqueFormulaHeaders];
-      const headerRange = sheet.getRangeByIndexes(0, 0, 1, protectedCols);
+      const headerRange = sheet.getRangeByIndexes(startRow, startCol, 1, protectedCols);
       headerRange.values = [allHeaderLabels];
       if (!options.preserveUserFormatting) {
-        const lookerHeaderRange = sheet.getRangeByIndexes(0, 0, 1, colCount);
+        const lookerHeaderRange = sheet.getRangeByIndexes(startRow, startCol, 1, colCount);
         lookerHeaderRange.format.font.bold = true;
         lookerHeaderRange.format.fill.color = "#1D5288"; // Looker Brand Blue
         lookerHeaderRange.format.font.color = "#FFFFFF";
       }
 
-      if (options.freezeHeader !== false) {
+      if (options.freezeHeader !== false && startRow === 0) {
         sheet.freezePanes.freezeRows(1);
       }
       await context.sync();
 
-      // 4. Batch write data in dynamic chunks
-      let currentRow = 1;
+      // 4. Batch write data in dynamic chunks starting at (startRow + 1, startCol)
+      let currentRowOffset = 1;
       for (let i = 0; i < totalRows; i += batchSize) {
         const slice = effectiveRows.slice(i, i + batchSize);
         const rowBlock: (string | number | boolean)[][] = slice.map((item) =>
@@ -781,20 +872,33 @@ export async function writeLookerDataToWorksheet(
           })
         );
 
-        const chunkRange = sheet.getRangeByIndexes(currentRow, 0, rowBlock.length, colCount);
+        const chunkRange = sheet.getRangeByIndexes(
+          startRow + currentRowOffset,
+          startCol,
+          rowBlock.length,
+          colCount
+        );
         chunkRange.values = rowBlock;
 
-        currentRow += rowBlock.length;
+        currentRowOffset += rowBlock.length;
         await context.sync();
 
-        onProgress(Math.min(100, Math.round((currentRow / totalRows) * 100)), currentRow);
+        onProgress(
+          Math.min(100, Math.round((currentRowOffset / totalRows) * 100)),
+          currentRowOffset
+        );
         await new Promise((r) => setTimeout(r, 0));
       }
 
-      // 5. Resize or Create Native Excel Table (ListObject) on data rows (excluding Looker Grand Total row)
+      // 5. Resize or Create Native Excel Table (ListObject) anchored at (startRow, startCol)
       try {
         if (options.useExcelTable && !hasSubtotals && listObjectBodyRows > 0) {
-          const fullRange = sheet.getRangeByIndexes(0, 0, listObjectBodyRows + 1, protectedCols);
+          const fullRange = sheet.getRangeByIndexes(
+            startRow,
+            startCol,
+            listObjectBodyRows + 1,
+            protectedCols
+          );
           if (existingTable) {
             existingTable.resize(fullRange);
             if (options.tableStyle) {
@@ -813,22 +917,20 @@ export async function writeLookerDataToWorksheet(
 
       // 5.5 Apply Semantic Styling for Row Totals, Subtotals, Row Outline Groups, and Grand Total
       try {
-        // Style Row Total columns
         if (totalRows > 0) {
           for (let c = 0; c < colCount; c++) {
             if (expandedColumns[c]?.isRowTotal) {
-              const rtColRng = sheet.getRangeByIndexes(1, c, totalRows, 1);
+              const rtColRng = sheet.getRangeByIndexes(startRow + 1, startCol + c, totalRows, 1);
               rtColRng.format.font.bold = true;
               rtColRng.format.fill.color = "#F8F9FA";
             }
           }
         }
 
-        // Style Subtotal rows and apply Excel Row Outline Grouping
         if (hasSubtotals) {
           for (const subRowIdx of matrix.subtotalRowIndices) {
-            const sheetRow = subRowIdx + 1;
-            const subRng = sheet.getRangeByIndexes(sheetRow, 0, 1, colCount);
+            const sheetRow = startRow + subRowIdx + 1;
+            const subRng = sheet.getRangeByIndexes(sheetRow, startCol, 1, colCount);
             subRng.format.font.bold = true;
             subRng.format.fill.color = "#F3F2F1";
             subRng.format.borders.getItem("EdgeTop").style = Excel.BorderLineStyle.continuous;
@@ -838,16 +940,20 @@ export async function writeLookerDataToWorksheet(
           for (const grp of matrix.outlineGroups) {
             const rowCountGrp = grp.endRowOffset - grp.startRowOffset + 1;
             if (rowCountGrp > 0) {
-              const grpRng = sheet.getRangeByIndexes(grp.startRowOffset + 1, 0, rowCountGrp, colCount);
+              const grpRng = sheet.getRangeByIndexes(
+                startRow + grp.startRowOffset + 1,
+                startCol,
+                rowCountGrp,
+                colCount
+              );
               grpRng.group(Excel.GroupOption.byRows);
             }
           }
         }
 
-        // Style Grand Total row
         if (matrix.grandTotalRowIndex !== null) {
-          const gtSheetRow = matrix.grandTotalRowIndex + 1;
-          const gtRng = sheet.getRangeByIndexes(gtSheetRow, 0, 1, colCount);
+          const gtSheetRow = startRow + matrix.grandTotalRowIndex + 1;
+          const gtRng = sheet.getRangeByIndexes(gtSheetRow, startCol, 1, colCount);
           gtRng.format.font.bold = true;
           gtRng.format.fill.color = "#E8F0FE";
           gtRng.format.borders.getItem("EdgeTop").style = Excel.BorderLineStyle.continuous;
@@ -865,7 +971,7 @@ export async function writeLookerDataToWorksheet(
           for (let c = 0; c < colCount; c++) {
             const fmt = expandedColumns[c]?.excelFormat;
             if (fmt) {
-              const colRange = sheet.getRangeByIndexes(1, c, totalRows, 1);
+              const colRange = sheet.getRangeByIndexes(startRow + 1, startCol + c, totalRows, 1);
               colRange.numberFormat = [[fmt]];
             }
           }
@@ -875,22 +981,27 @@ export async function writeLookerDataToWorksheet(
         console.warn("Could not apply number formats:", e);
       }
 
-      // 7. Restore & Auto-expand adjacent formula columns down to listObjectBodyRows (isolated sync)
+      // 7. Restore & Auto-expand adjacent formula columns down to listObjectBodyRows
       const formulaRowCount = listObjectBodyRows > 0 ? listObjectBodyRows : totalRows;
       if (options.autoExpandFormulas && savedFormulaCols.length > 0 && formulaRowCount >= 1) {
         for (let idx = 0; idx < savedFormulaCols.length; idx++) {
           const fCol = savedFormulaCols[idx];
           try {
-            const targetColIndex = colCount + fCol.offset;
-            const headerCell = sheet.getRangeByIndexes(0, targetColIndex, 1, 1);
+            const targetColIndex = startCol + colCount + fCol.offset;
+            const headerCell = sheet.getRangeByIndexes(startRow, targetColIndex, 1, 1);
             headerCell.values = [[uniqueFormulaHeaders[idx]]];
 
-            const formulaOrigin = sheet.getRangeByIndexes(1, targetColIndex, 1, 1);
+            const formulaOrigin = sheet.getRangeByIndexes(startRow + 1, targetColIndex, 1, 1);
             formulaOrigin.formulas = [[fCol.formula]];
             await context.sync();
 
             if (formulaRowCount > 1) {
-              const formulaTarget = sheet.getRangeByIndexes(1, targetColIndex, formulaRowCount, 1);
+              const formulaTarget = sheet.getRangeByIndexes(
+                startRow + 1,
+                targetColIndex,
+                formulaRowCount,
+                1
+              );
               try {
                 formulaTarget.copyFrom(formulaOrigin, Excel.RangeCopyType.formulas);
                 await context.sync();
@@ -901,7 +1012,12 @@ export async function writeLookerDataToWorksheet(
             }
 
             if (fCol.numberFormat) {
-              const fmtRange = sheet.getRangeByIndexes(1, targetColIndex, formulaRowCount, 1);
+              const fmtRange = sheet.getRangeByIndexes(
+                startRow + 1,
+                targetColIndex,
+                formulaRowCount,
+                1
+              );
               fmtRange.numberFormat = [[fCol.numberFormat]];
               await context.sync();
             }
@@ -914,7 +1030,7 @@ export async function writeLookerDataToWorksheet(
       // 8. Sampled Autofit (Top 150 rows) across Looker + formula columns
       try {
         const sampleRows = Math.min(totalRows + 1, 150);
-        const sampleRange = sheet.getRangeByIndexes(0, 0, sampleRows, protectedCols);
+        const sampleRange = sheet.getRangeByIndexes(startRow, startCol, sampleRows, protectedCols);
         sampleRange.format.autofitColumns();
         await context.sync();
       } catch (e) {

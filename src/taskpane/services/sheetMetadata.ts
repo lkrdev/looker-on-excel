@@ -1,8 +1,20 @@
 import { QueryPayload } from "./queryTaskRunner";
-import { ColumnDefinition, WriteOptions } from "./excelWriter";
+import {
+  ColumnDefinition,
+  WriteOptions,
+  BoundingBox,
+  parseCellAddress,
+  formatCellAddress,
+} from "./excelWriter";
 import { FilterCondition } from "../components/FilterBuilder";
 
 export interface StoredSheetConfig {
+  tableId?: string;
+  anchorCell?: string;
+  startRow?: number;
+  startCol?: number;
+  endRow?: number;
+  endCol?: number;
   queryPayload: QueryPayload;
   columns: ColumnDefinition[];
   options: WriteOptions;
@@ -15,14 +27,167 @@ export interface StoredSheetConfig {
 }
 
 const PROPERTY_KEY = "looker_query_config";
+const MULTI_TABLE_PROPERTY_KEY = "looker_tables_v2";
 
 /**
- * Saves query metadata to the target or active worksheet's custom properties.
+ * Normalizes a StoredSheetConfig with computed bounding-box coordinates [startRow..endRow, startCol..endCol].
+ */
+export function normalizeTableConfigBounds(config: StoredSheetConfig): StoredSheetConfig {
+  const anchor = (config.anchorCell || config.options?.anchorCell || "A1").toUpperCase();
+  const { startRow, startCol } = parseCellAddress(anchor);
+  const colSpan = Math.max(1, config.options?.prevColCount || config.columns?.length || 1);
+  const rowSpan = Math.max(1, (config.rowCount || 0) + 1); // +1 for header row
+  const tableId =
+    config.tableId || config.options?.tableId || `Looker_${anchor}`;
+
+  return {
+    ...config,
+    tableId,
+    anchorCell: anchor,
+    startRow,
+    startCol,
+    endRow: startRow + rowSpan - 1,
+    endCol: startCol + colSpan - 1,
+    options: {
+      ...config.options,
+      anchorCell: anchor,
+      tableId,
+    },
+  };
+}
+
+/**
+ * Upserts a table configuration into a worksheet's multi-table collection by matching
+ * either `tableId` or `anchorCell`.
+ */
+export function upsertTableInCollection(
+  existingTables: StoredSheetConfig[],
+  newConfig: StoredSheetConfig
+): StoredSheetConfig[] {
+  const normalized = normalizeTableConfigBounds(newConfig);
+  const normalizedList = existingTables.map(normalizeTableConfigBounds);
+
+  const idx = normalizedList.findIndex(
+    (t) =>
+      (normalized.tableId && t.tableId === normalized.tableId) ||
+      (t.anchorCell || "A1").toUpperCase() === (normalized.anchorCell || "A1").toUpperCase()
+  );
+
+  if (idx >= 0) {
+    const updated = [...normalizedList];
+    updated[idx] = normalized;
+    return updated;
+  }
+  return [...normalizedList, normalized];
+}
+
+/**
+ * Hit-tests which StoredSheetConfig on a worksheet contains the given 0-based (rowIndex, colIndex).
+ * If no table bounding box directly contains the cell, falls back to preferredTableId or the first table.
+ */
+export function hitTestTableAtCell(
+  tables: StoredSheetConfig[],
+  rowIndex: number,
+  colIndex: number,
+  preferredTableId?: string | null
+): StoredSheetConfig | null {
+  if (!tables || tables.length === 0) return null;
+  const normalized = tables.map(normalizeTableConfigBounds);
+
+  const directHit = normalized.find((t) => {
+    const r0 = t.startRow ?? 0;
+    const c0 = t.startCol ?? 0;
+    const r1 = t.endRow ?? r0 + Math.max(1, t.rowCount);
+    const c1 = t.endCol ?? c0 + Math.max(1, t.columns.length - 1);
+    return rowIndex >= r0 && rowIndex <= r1 && colIndex >= c0 && colIndex <= c1;
+  });
+
+  if (directHit) return directHit;
+
+  if (preferredTableId) {
+    const byId = normalized.find((t) => t.tableId === preferredTableId);
+    if (byId) return byId;
+  }
+
+  return normalized[0];
+}
+
+/**
+ * Computes bounding boxes of all sibling Looker tables on the same worksheet so
+ * refreshing one table never clears or shifts into another table.
+ */
+export function getSiblingTableBoundingBoxes(
+  tables: StoredSheetConfig[],
+  currentTableId?: string,
+  currentAnchorCell?: string
+): BoundingBox[] {
+  const normAnchor = (currentAnchorCell || "A1").toUpperCase();
+  return tables
+    .map(normalizeTableConfigBounds)
+    .filter(
+      (t) =>
+        !(
+          (currentTableId && t.tableId === currentTableId) ||
+          (t.anchorCell || "A1").toUpperCase() === normAnchor
+        )
+    )
+    .map((t) => ({
+      top: t.startRow ?? 0,
+      bottom: t.endRow ?? (t.startRow ?? 0) + Math.max(1, t.rowCount),
+      left: t.startCol ?? 0,
+      right: t.endCol ?? (t.startCol ?? 0) + Math.max(1, t.columns.length - 1),
+    }));
+}
+
+/**
+ * Reads the currently selected cell address in the active worksheet (e.g., "H4").
+ */
+export async function getActiveCellAddress(): Promise<string> {
+  try {
+    return await Excel.run(async (context) => {
+      const rng = context.workbook.getSelectedRange();
+      rng.load(["rowIndex", "columnIndex"]);
+      await context.sync();
+      return formatCellAddress(rng.rowIndex, rng.columnIndex);
+    });
+  } catch {
+    return "A1";
+  }
+}
+
+function parseSheetTablesFromCustomProps(
+  items: Array<{ key: string; value: string }>
+): StoredSheetConfig[] {
+  const v2Item = items.find((p) => p.key === MULTI_TABLE_PROPERTY_KEY);
+  if (v2Item && v2Item.value) {
+    try {
+      const parsed = JSON.parse(v2Item.value);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed.map(normalizeTableConfigBounds);
+      }
+    } catch {}
+  }
+
+  const legacyItem = items.find((p) => p.key === PROPERTY_KEY);
+  if (legacyItem && legacyItem.value) {
+    try {
+      const parsed = JSON.parse(legacyItem.value) as StoredSheetConfig;
+      return [normalizeTableConfigBounds(parsed)];
+    } catch {}
+  }
+
+  return [];
+}
+
+/**
+ * Saves query metadata to the target or active worksheet's custom properties,
+ * updating both the multi-table collection (`looker_tables_v2`) and legacy `looker_query_config`.
  */
 export async function saveSheetMetadata(
   config: StoredSheetConfig,
   targetSheetId?: string
-): Promise<void> {
+): Promise<StoredSheetConfig[]> {
+  let updatedList: StoredSheetConfig[] = [];
   await Excel.run(async (context) => {
     const sheet = targetSheetId
       ? context.workbook.worksheets.getItem(targetSheetId)
@@ -31,16 +196,27 @@ export async function saveSheetMetadata(
     customProps.load(["items"]);
     await context.sync();
 
-    // Check if property exists
-    const existing = customProps.items.find((p) => p.key === PROPERTY_KEY);
-    if (existing) {
-      existing.value = JSON.stringify(config);
+    const existingTables = parseSheetTablesFromCustomProps(customProps.items);
+    updatedList = upsertTableInCollection(existingTables, config);
+    const normalizedCurrent = normalizeTableConfigBounds(config);
+
+    const existingV2 = customProps.items.find((p) => p.key === MULTI_TABLE_PROPERTY_KEY);
+    if (existingV2) {
+      existingV2.value = JSON.stringify(updatedList);
     } else {
-      customProps.add(PROPERTY_KEY, JSON.stringify(config));
+      customProps.add(MULTI_TABLE_PROPERTY_KEY, JSON.stringify(updatedList));
+    }
+
+    const existingLegacy = customProps.items.find((p) => p.key === PROPERTY_KEY);
+    if (existingLegacy) {
+      existingLegacy.value = JSON.stringify(normalizedCurrent);
+    } else {
+      customProps.add(PROPERTY_KEY, JSON.stringify(normalizedCurrent));
     }
 
     await context.sync();
   });
+  return updatedList;
 }
 
 export interface ActiveSheetInfo {
@@ -48,22 +224,24 @@ export interface ActiveSheetInfo {
   sourceSheetId: string | null;
   sourceSheetName?: string;
   config: StoredSheetConfig | null;
+  allSheetTables?: StoredSheetConfig[];
+  selectedCellAddress?: string;
   isPivotSheet?: boolean;
 }
 
 /**
- * Reads the active worksheet ID and its Looker query metadata in a single Excel.run pass.
- * If the active worksheet is a dedicated PivotTable sheet (no Looker metadata of its own,
- * but contains at least one PivotTable), resolves the Looker source worksheet so Refresh
- * and Edit Query operate on the source data sheet rather than colliding with the PivotTable.
+ * Reads the active worksheet ID, selected cell, and Looker multi-table metadata in a single Excel.run pass.
  */
 export async function getActiveSheetInfo(
-  preferredSourceSheetId?: string | null
+  preferredSourceSheetId?: string | null,
+  preferredTableId?: string | null
 ): Promise<ActiveSheetInfo> {
   try {
     return await Excel.run(async (context) => {
       const sheet = context.workbook.worksheets.getActiveWorksheet();
+      const selectedRange = context.workbook.getSelectedRange();
       sheet.load(["id", "name"]);
+      selectedRange.load(["rowIndex", "columnIndex"]);
       const customProps = sheet.customProperties;
       const sheetPivots = sheet.pivotTables;
       const sheetTables = sheet.tables;
@@ -72,23 +250,32 @@ export async function getActiveSheetInfo(
       sheetTables.load(["items/name"]);
       await context.sync();
 
-      const item = customProps.items.find((p) => p.key === PROPERTY_KEY);
+      const selectedCellAddress = formatCellAddress(
+        selectedRange.rowIndex,
+        selectedRange.columnIndex
+      );
+      const tablesOnSheet = parseSheetTablesFromCustomProps(customProps.items);
       const hasPivots = sheetPivots.items.length > 0;
       const hasTables = sheetTables.items.length > 0;
 
-      // If this worksheet has Looker metadata and is not a PivotTable-only sheet, use it directly
-      if (item && item.value && (!hasPivots || hasTables)) {
+      if (tablesOnSheet.length > 0 && (!hasPivots || hasTables)) {
+        const hitConfig = hitTestTableAtCell(
+          tablesOnSheet,
+          selectedRange.rowIndex,
+          selectedRange.columnIndex,
+          preferredTableId
+        );
         return {
           activeSheetId: sheet.id,
           sourceSheetId: sheet.id,
           sourceSheetName: sheet.name,
-          config: JSON.parse(item.value) as StoredSheetConfig,
+          config: hitConfig,
+          allSheetTables: tablesOnSheet,
+          selectedCellAddress,
           isPivotSheet: false,
         };
       }
 
-      // If the active sheet contains a PivotTable (e.g. created via Insert -> PivotTable -> New Worksheet),
-      // resolve the backing Looker worksheet in the workbook so Refresh / Edit Query writes to the source sheet.
       if (hasPivots) {
         const sheets = context.workbook.worksheets;
         sheets.load(["items/id", "items/name"]);
@@ -103,17 +290,21 @@ export async function getActiveSheetInfo(
           });
         await context.sync();
 
-        const lookerSheets: Array<{ id: string; name: string; config: StoredSheetConfig }> = [];
+        const lookerSheets: Array<{
+          id: string;
+          name: string;
+          config: StoredSheetConfig;
+          allTables: StoredSheetConfig[];
+        }> = [];
         for (const { s, props } of candidates) {
-          const propItem = props.items.find((p) => p.key === PROPERTY_KEY);
-          if (propItem && propItem.value) {
-            try {
-              lookerSheets.push({
-                id: s.id,
-                name: s.name,
-                config: JSON.parse(propItem.value) as StoredSheetConfig,
-              });
-            } catch {}
+          const parsedTables = parseSheetTablesFromCustomProps(props.items);
+          if (parsedTables.length > 0) {
+            lookerSheets.push({
+              id: s.id,
+              name: s.name,
+              config: parsedTables[0],
+              allTables: parsedTables,
+            });
           }
         }
 
@@ -130,6 +321,8 @@ export async function getActiveSheetInfo(
             sourceSheetId: matched.id,
             sourceSheetName: matched.name,
             config: matched.config,
+            allSheetTables: matched.allTables,
+            selectedCellAddress,
             isPivotSheet: true,
           };
         }
@@ -139,28 +332,32 @@ export async function getActiveSheetInfo(
         activeSheetId: sheet.id,
         sourceSheetId: null,
         config: null,
+        allSheetTables: [],
+        selectedCellAddress,
         isPivotSheet: hasPivots,
       };
     });
   } catch (e) {
     console.warn("Could not read sheet custom properties:", e);
-    return { activeSheetId: null, sourceSheetId: null, config: null };
+    return { activeSheetId: null, sourceSheetId: null, config: null, allSheetTables: [] };
   }
 }
 
-/**
- * Reads query metadata from the active worksheet.
- */
 export async function getActiveSheetMetadata(): Promise<StoredSheetConfig | null> {
   const { config } = await getActiveSheetInfo();
   return config;
 }
 
 /**
- * Catalogs all sheets in the workbook containing Looker queries using a single batched sync.
+ * Catalogs all Looker tables across all worksheets in the workbook using a single batched sync.
  */
 export async function getAllWorkbookLookerSheets(): Promise<
-  Array<{ sheetId: string; sheetName: string; config: StoredSheetConfig }>
+  Array<{
+    sheetId: string;
+    sheetName: string;
+    config: StoredSheetConfig;
+    allTables: StoredSheetConfig[];
+  }>
 > {
   try {
     return await Excel.run(async (context) => {
@@ -175,19 +372,22 @@ export async function getAllWorkbookLookerSheets(): Promise<
       });
       await context.sync();
 
-      const results: Array<{ sheetId: string; sheetName: string; config: StoredSheetConfig }> = [];
+      const results: Array<{
+        sheetId: string;
+        sheetName: string;
+        config: StoredSheetConfig;
+        allTables: StoredSheetConfig[];
+      }> = [];
 
       for (const { sheet, props } of propCollections) {
-        const match = props.items.find((p) => p.key === PROPERTY_KEY);
-        if (match && match.value) {
-          try {
-            const parsed = JSON.parse(match.value);
-            results.push({
-              sheetId: sheet.id,
-              sheetName: sheet.name,
-              config: parsed,
-            });
-          } catch {}
+        const tables = parseSheetTablesFromCustomProps(props.items);
+        for (const tbl of tables) {
+          results.push({
+            sheetId: sheet.id,
+            sheetName: sheet.name,
+            config: tbl,
+            allTables: tables,
+          });
         }
       }
 
