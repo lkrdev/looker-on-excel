@@ -148,6 +148,50 @@ function isNestedPivotObject(val: any): boolean {
 }
 
 /**
+ * Resolves clean, human-readable pivot dimension values from a Looker `json_detail` pivot key
+ * (e.g. `"1 - Processing|FIELD|0|FIELD|Processing"` -> `["1 - Processing", "Processing"]`).
+ * Uses `pivotsMeta` (`labels` / `data`) when available, and falls back to stripping Looker's
+ * internal `|FIELD|` delimiters and injected `case:` / `order_by_field` sort indices.
+ */
+export function resolveCleanPivotValues(
+  rawPivotKey: string,
+  pivots?: string[],
+  pivotsMeta?: PivotDescriptor[] | null
+): string[] {
+  if (pivotsMeta && pivotsMeta.length > 0) {
+    const pm = pivotsMeta.find((p) => p.key === rawPivotKey);
+    if (pm && (pm.labels || pm.data) && pivots && pivots.length > 0) {
+      return pivots.map((pf) => {
+        const v = pm.labels?.[pf] ?? pm.data?.[pf];
+        return v === null || v === undefined || v === "null" ? "None" : String(v);
+      });
+    }
+  }
+
+  if (rawPivotKey.includes("|FIELD|")) {
+    const parts = rawPivotKey
+      .split("|FIELD|")
+      .map((s) => (s === "null" ? "None" : s.trim()));
+    const expectedCount = pivots && pivots.length > 0 ? pivots.length : parts.length;
+    if (parts.length > expectedCount) {
+      const filtered = parts.filter(
+        (token, idx) => !(idx > 0 && idx < parts.length - 1 && /^\d+$/.test(token))
+      );
+      if (filtered.length >= expectedCount) {
+        return filtered.slice(0, expectedCount);
+      }
+    }
+    return parts;
+  }
+
+  if (pivots && pivots.length > 1 && rawPivotKey.includes("|")) {
+    return rawPivotKey.split("|").map((s) => (s === "null" ? "None" : s.trim()));
+  }
+
+  return [rawPivotKey === "null" ? "None" : rawPivotKey];
+}
+
+/**
  * Extracts all flat pivot cohort keys, their per-dimension pivot values, and scalar cell values
  * from a measure cell object (handling both 1-dim / json_detail flat maps and multi-level nested JSON maps).
  */
@@ -162,11 +206,6 @@ function extractMeasurePivotLeaves(
     return [];
   }
 
-  const metaByKey = new Map<string, PivotDescriptor>();
-  if (pivotsMeta) {
-    pivotsMeta.forEach((pm) => metaByKey.set(pm.key, pm));
-  }
-
   const leaves: Array<{ pivotKey: string; pivotValues: string[]; value: any; path: string[] }> = [];
 
   const walk = (node: Record<string, any>, currentVals: string[], currentPath: string[]) => {
@@ -176,7 +215,6 @@ function extractMeasurePivotLeaves(
         typeof v === "object" &&
         !Array.isArray(v) &&
         Object.keys(v).length > 0 &&
-        // If `k` is a pivot dimension name (in deeply nested multi-pivot JSON), skip adding `k` to pivotValues
         pivots &&
         pivots.includes(k)
       ) {
@@ -186,17 +224,10 @@ function extractMeasurePivotLeaves(
       } else {
         const rawVals = [...currentVals, k === "null" ? "None" : k];
         const pivotKey = currentVals.length === 0 ? k : rawVals.join("|");
-        let resolvedValues = rawVals;
-
-        const meta = metaByKey.get(pivotKey);
-        if (meta && meta.data && pivots && pivots.length > 0) {
-          resolvedValues = pivots.map((pf) => {
-            const dv = meta.data?.[pf];
-            return dv === null || dv === undefined || dv === "null" ? "None" : String(dv);
-          });
-        } else if (pivots && pivots.length > 1 && rawVals.length === 1 && pivotKey.includes("|")) {
-          resolvedValues = pivotKey.split("|").map((s) => (s === "null" ? "None" : s.trim()));
-        }
+        const resolvedValues =
+          rawVals.length === 1
+            ? resolveCleanPivotValues(pivotKey, pivots, pivotsMeta)
+            : rawVals;
 
         leaves.push({
           pivotKey,
@@ -313,13 +344,7 @@ export function expandPivotedColumns(
     if (pivotsMeta && pivotsMeta.length > 0) {
       for (const pm of pivotsMeta) {
         if (pm.is_total || pm.key === "$$$_row_total_$$$") continue;
-        const resolvedValues =
-          pm.data && pivots && pivots.length > 0
-            ? pivots.map((pf) => {
-                const dv = pm.data?.[pf];
-                return dv === null || dv === undefined || dv === "null" ? "None" : String(dv);
-              })
-            : [pm.key === "null" ? "None" : pm.key];
+        const resolvedValues = resolveCleanPivotValues(pm.key, pivots, pivotsMeta);
         const info: CohortInfo = {
           pivotKey: pm.key,
           pivotValues: resolvedValues,

@@ -6,6 +6,8 @@ import {
   DashboardElementDef,
   FieldDefinition,
 } from "../src/taskpane/services/lookerClient";
+import { resolveCleanPivotValues, expandPivotedColumns } from "../src/taskpane/services/excelWriter";
+import { normalizeQueryResult } from "../src/taskpane/services/queryTaskRunner";
 
 function assertEqual(actual: any, expected: any, testName: string) {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
@@ -147,6 +149,66 @@ export function runLooksAndDashboardsTests() {
       "orders.count",
     ],
     "orderFieldsDimensionsFirst partitions non-pivoted dimensions first, then pivoted dimensions, then measures while preserving relative order within each group"
+  );
+
+  // 4. Verify multi-pivot LookML `case:` dimension keys (`1 - Processing|FIELD|0|FIELD|Processing`)
+  // are resolved to clean human-readable labels via `pivotsMeta` (and fallback `|FIELD|` stripping)
+  const pivots = ["order_items.status_in_order", "order_items.status"];
+  const rawJsonDetail = {
+    pivots: [
+      {
+        key: "1 - Processing|FIELD|0|FIELD|Processing",
+        data: { "order_items.status_in_order": "1 - Processing", "order_items.status": "Processing" },
+        labels: { "order_items.status_in_order": "1 - Processing", "order_items.status": "Processing" },
+        is_total: false,
+      },
+      {
+        key: "1x - Cancelled|FIELD|1|FIELD|Cancelled",
+        data: { "order_items.status_in_order": "1x - Cancelled", "order_items.status": "Cancelled" },
+        labels: { "order_items.status_in_order": "1x - Cancelled", "order_items.status": "Cancelled" },
+        is_total: false,
+      },
+    ],
+    data: [
+      {
+        "order_items.validation_status": { value: "Valid" },
+        "order_items.count": {
+          "1 - Processing|FIELD|0|FIELD|Processing": { value: 9132 },
+          "1x - Cancelled|FIELD|1|FIELD|Cancelled": { value: null },
+        },
+      },
+    ],
+  };
+
+  const bundle = normalizeQueryResult(rawJsonDetail, pivots, "json_detail");
+  const { expandedColumns } = expandPivotedColumns(
+    [
+      { fieldKey: "order_items.validation_status", label: "Order Items Validation Status", category: "dimension" },
+      { fieldKey: "order_items.status_in_order", label: "Order Items Status In Order", category: "dimension" },
+      { fieldKey: "order_items.status", label: "Order Items Status", category: "dimension" },
+      { fieldKey: "order_items.count", label: "Order Items # of Order Items", category: "measure" },
+    ],
+    bundle.rows,
+    pivots,
+    false,
+    bundle.pivotsMeta
+  );
+
+  assertEqual(
+    expandedColumns.map((c) => c.label),
+    [
+      "Order Items Validation Status",
+      "Order Items # of Order Items (1 - Processing · Processing)",
+      "Order Items # of Order Items (1x - Cancelled · Cancelled)",
+    ],
+    "Multi-pivot LookML case dimension keys resolve to clean human-readable labels without |FIELD|0|FIELD|"
+  );
+
+  // Verify fallback without pivotsMeta also strips |FIELD| and injected numeric sort token
+  assertEqual(
+    resolveCleanPivotValues("1 - Processing|FIELD|0|FIELD|Processing", pivots, null),
+    ["1 - Processing", "Processing"],
+    "Fallback resolveCleanPivotValues strips |FIELD| and numeric case sort index"
   );
 
   console.log("=== All Saved Looks & Dashboards Tests Passed! ===");

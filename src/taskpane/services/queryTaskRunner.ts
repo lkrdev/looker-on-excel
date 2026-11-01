@@ -6,6 +6,7 @@ export interface QueryPayload {
   sorts?: string[];
   limit?: string;
   pivots?: string[] | null;
+  fill_fields?: string[] | null;
   total?: boolean;
   row_total?: "right" | "left" | null;
   subtotals?: string[] | null;
@@ -15,7 +16,9 @@ export interface PivotDescriptor {
   key: string;
   is_total?: boolean;
   label?: string;
+  labels?: Record<string, string>;
   data?: Record<string, string>;
+  sort_values?: Record<string, string>;
 }
 
 export interface QueryExecutionBundle {
