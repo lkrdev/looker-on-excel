@@ -1447,6 +1447,11 @@ export const App: React.FC = () => {
                   onDestinationChange={setDestination}
                   options={tableOptions}
                   onOptionsChange={(upd) => setTableOptions((prev) => ({ ...prev, ...upd }))}
+                  pivots={pivots}
+                  selectedMeasureLabels={selectedFields
+                    .map((fk) => exploreDetail.fields.measures.find((m) => m.name === fk))
+                    .filter((m): m is NonNullable<typeof m> => Boolean(m))
+                    .map((m) => m.label_short || m.label || m.name)}
                 />
               </>
             )}

@@ -42,6 +42,8 @@ interface TableSettingsProps {
   onDestinationChange: (dest: "active" | "new") => void;
   options: WriteOptions;
   onOptionsChange: (updates: Partial<WriteOptions>) => void;
+  pivots?: string[];
+  selectedMeasureLabels?: string[];
 }
 
 export const TableSettings: React.FC<TableSettingsProps> = ({
@@ -51,11 +53,16 @@ export const TableSettings: React.FC<TableSettingsProps> = ({
   onDestinationChange,
   options,
   onOptionsChange,
+  pivots = [],
+  selectedMeasureLabels = [],
 }) => {
   const styles = useStyles();
   const PRESET_LIMITS = ["500", "2000", "10000", "25000", "50000", "100000", "-1"];
   const isCustom = !PRESET_LIMITS.includes(rowLimit);
   const [showCustomInput, setShowCustomInput] = React.useState(isCustom);
+  const m1 = selectedMeasureLabels[0] || "Measure 1";
+  const m2 = selectedMeasureLabels[1] || "Measure 2";
+  const hasMultipleMeasures = selectedMeasureLabels.length >= 2;
 
   return (
     <div className={styles.container}>
@@ -253,41 +260,45 @@ export const TableSettings: React.FC<TableSettingsProps> = ({
               </div>
 
               {/* Crosstab & Multi-Pivot Layout */}
-              <div className={styles.row}>
-                <Label size="small" weight="semibold">
-                  Crosstab &amp; Pivot Layout
-                </Label>
-                <Select
-                  size="small"
-                  value={options.pivotGroupMode || "measure_first"}
-                  onChange={(_, data) =>
-                    onOptionsChange({ pivotGroupMode: data.value as PivotGroupMode })
-                  }
-                >
-                  <option value="measure_first">
-                    Group by Measure (Revenue [2024, 2025], Margin [2024, 2025])
-                  </option>
-                  <option value="cohort_first">
-                    Group by Pivot Cohort (2024 [Revenue, Margin], 2025 [Revenue, Margin])
-                  </option>
-                </Select>
-                <Checkbox
-                  checked={options.useMultiRowCrosstabHeader ?? false}
-                  onChange={(_, data) =>
-                    onOptionsChange({ useMultiRowCrosstabHeader: !!data.checked })
-                  }
-                  label={
-                    <div>
-                      <span style={{ fontSize: "12px", fontWeight: 600 }}>
-                        Multi-Row Merged Crosstab Header
-                      </span>
-                      <Caption1 style={{ color: tokens.colorNeutralForeground3, display: "block" }}>
-                        Renders stacked pivot cohort rows with merged header cells above measure names.
-                      </Caption1>
-                    </div>
-                  }
-                />
-              </div>
+              {(pivots.length > 0 || options.useMultiRowCrosstabHeader) && (
+                <div className={styles.row}>
+                  <Label size="small" weight="semibold">
+                    Crosstab &amp; Pivot Layout
+                  </Label>
+                  {hasMultipleMeasures && (
+                    <Select
+                      size="small"
+                      value={options.pivotGroupMode || "measure_first"}
+                      onChange={(_, data) =>
+                        onOptionsChange({ pivotGroupMode: data.value as PivotGroupMode })
+                      }
+                    >
+                      <option value="measure_first">
+                        Group by Measure ({m1} [Pivots], {m2} [Pivots])
+                      </option>
+                      <option value="cohort_first">
+                        Group by Pivot Value (Pivot [{m1}, {m2}])
+                      </option>
+                    </Select>
+                  )}
+                  <Checkbox
+                    checked={options.useMultiRowCrosstabHeader ?? false}
+                    onChange={(_, data) =>
+                      onOptionsChange({ useMultiRowCrosstabHeader: !!data.checked })
+                    }
+                    label={
+                      <div>
+                        <span style={{ fontSize: "12px", fontWeight: 600 }}>
+                          Multi-Row Merged Crosstab Header
+                        </span>
+                        <Caption1 style={{ color: tokens.colorNeutralForeground3, display: "block" }}>
+                          Renders stacked pivot cohort rows with merged header cells above measure names.
+                        </Caption1>
+                      </div>
+                    }
+                  />
+                </div>
+              )}
 
               {/* Enterprise SAC Benchmarks */}
               <div className={styles.row}>
