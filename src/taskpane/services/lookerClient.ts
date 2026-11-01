@@ -153,6 +153,59 @@ export function convertWriteQueryToPayload(wq: LookerWriteQuery): QueryPayload {
 }
 
 /**
+ * Stably orders query field keys so that Dimensions always appear before Measures
+ * (matching Looker's Explore data table layout: non-pivoted dimensions -> pivoted dimensions -> measures),
+ * while preserving the relative order within each category.
+ *
+ * Looker's Saved Look and Dashboard APIs return `query.fields` in the raw chronological order
+ * that the author clicked fields in the UI, which can interleave measures before dimensions.
+ */
+export function orderFieldsDimensionsFirst(
+  fieldKeys: string[],
+  availableFields: FieldDefinition[],
+  pivots?: string[] | null
+): string[] {
+  if (!Array.isArray(fieldKeys) || fieldKeys.length <= 1) {
+    return Array.isArray(fieldKeys) ? [...fieldKeys] : [];
+  }
+
+  const fieldMap = new Map<string, FieldDefinition>();
+  for (const f of availableFields) {
+    fieldMap.set(f.name, f);
+  }
+  const pivotSet = new Set<string>(Array.isArray(pivots) ? pivots : []);
+
+  const nonPivotedDimensions: string[] = [];
+  const pivotedDimensions: string[] = [];
+  const unknownFields: string[] = [];
+  const measures: string[] = [];
+
+  for (const key of fieldKeys) {
+    const def = fieldMap.get(key);
+    if (def?.category === "dimension") {
+      if (pivotSet.has(key)) {
+        pivotedDimensions.push(key);
+      } else {
+        nonPivotedDimensions.push(key);
+      }
+    } else if (def?.category === "measure") {
+      measures.push(key);
+    } else if (pivotSet.has(key)) {
+      pivotedDimensions.push(key);
+    } else {
+      unknownFields.push(key);
+    }
+  }
+
+  return [
+    ...nonPivotedDimensions,
+    ...pivotedDimensions,
+    ...unknownFields,
+    ...measures,
+  ];
+}
+
+/**
  * Extracts the query and any dashboard filter `listen` bindings from a DashboardElementDef.
  */
 export function extractTileQueryAndListeners(el: DashboardElementDef): {
