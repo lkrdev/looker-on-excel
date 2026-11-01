@@ -275,6 +275,77 @@ export function normalizeQueryResult(
 }
 
 /**
+ * Extracts a detailed, human-readable Looker error message from a `/query_tasks/{id}/results`
+ * or `/queries/run/{format}` payload across both `json` (`[{ looker_error }]`) and
+ * `json_detail` (`{ errors: [{ message, message_details }] }`) formats, as well as
+ * HTTP 400/422 `{ message, errors }` responses.
+ */
+export function extractLookerQueryError(rawResult: any): string | null {
+  if (!rawResult) return null;
+
+  if (typeof rawResult === "string") {
+    const trimmed = rawResult.trim();
+    if (!trimmed) return null;
+    try {
+      const parsed = JSON.parse(trimmed);
+      return extractLookerQueryError(parsed) || trimmed;
+    } catch {
+      return trimmed;
+    }
+  }
+
+  if (Array.isArray(rawResult)) {
+    if (rawResult.length === 1 && rawResult[0] && typeof rawResult[0] === "object") {
+      if (typeof rawResult[0].looker_error === "string" && rawResult[0].looker_error.trim()) {
+        return rawResult[0].looker_error.trim();
+      }
+      if (Array.isArray(rawResult[0].errors)) {
+        return extractLookerQueryError(rawResult[0]);
+      }
+    }
+    return null;
+  }
+
+  if (typeof rawResult === "object") {
+    if (typeof rawResult.looker_error === "string" && rawResult.looker_error.trim()) {
+      return rawResult.looker_error.trim();
+    }
+    if (Array.isArray(rawResult.errors) && rawResult.errors.length > 0) {
+      const messages = rawResult.errors
+        .map((e: any) => {
+          if (!e || typeof e !== "object") return typeof e === "string" ? e : "";
+          const main = e.message || e.error || "";
+          const details =
+            e.message_details && typeof e.message_details === "string"
+              ? ` (${e.message_details.trim()})`
+              : "";
+          return `${main}${details}`.trim();
+        })
+        .filter(Boolean);
+      if (messages.length > 0) {
+        return messages.join("; ");
+      }
+    }
+    if (typeof rawResult.message === "string" && rawResult.message.trim()) {
+      return rawResult.message.trim();
+    }
+    // Check nested multi_results wrapper: { [taskId]: { status: "error", data: ... } }
+    const keys = Object.keys(rawResult);
+    if (
+      keys.length === 1 &&
+      rawResult[keys[0]] &&
+      typeof rawResult[keys[0]] === "object" &&
+      ("data" in rawResult[keys[0]] || "errors" in rawResult[keys[0]])
+    ) {
+      const inner = rawResult[keys[0]];
+      return extractLookerQueryError(inner.data) || extractLookerQueryError(inner);
+    }
+  }
+
+  return null;
+}
+
+/**
  * Executes a Looker query asynchronously via the Query Task API with live polling and cancellation.
  * Automatically selects lightweight `json` vs `json_detail` (or split total query for 5k+ rows).
  */
@@ -301,7 +372,8 @@ export async function runQueryTask(
 
   if (!queryRes.ok) {
     const errText = await queryRes.text();
-    throw new Error(`Failed to create query (${queryRes.status}): ${errText}`);
+    const detail = extractLookerQueryError(errText) || errText;
+    throw new Error(`Failed to create query (${queryRes.status}): ${detail}`);
   }
 
   const queryObj = await queryRes.json();
@@ -319,7 +391,8 @@ export async function runQueryTask(
 
   if (!createRes.ok) {
     const errText = await createRes.text();
-    throw new Error(`Failed to create query task (${createRes.status}): ${errText}`);
+    const detail = extractLookerQueryError(errText) || errText;
+    throw new Error(`Failed to create query task (${createRes.status}): ${detail}`);
   }
 
   const { id: taskId } = await createRes.json();
@@ -358,10 +431,16 @@ export async function runQueryTask(
             { headers, signal: abortController.signal }
           );
           if (!resultsRes.ok) {
-            throw new Error(`Failed to fetch query results (${resultsRes.status})`);
+            const errText = await resultsRes.text();
+            const detail = extractLookerQueryError(errText) || `HTTP ${resultsRes.status}`;
+            throw new Error(`Failed to fetch query results: ${detail}`);
           }
           const rawMain = await resultsRes.json();
+          const inBandErr = extractLookerQueryError(rawMain);
           const bundle = normalizeQueryResult(rawMain, queryPayload.pivots, strategy);
+          if (inBandErr && bundle.rows.length === 0) {
+            throw new Error(inBandErr);
+          }
 
           // If using split_json_and_total on a 5k+ row query, fetch the 1-row totals_data via inline json_detail
           if (strategy === "split_json_and_total" && queryPayload.total) {
@@ -394,7 +473,26 @@ export async function runQueryTask(
 
           return bundle;
         } else if (status === "error" || status === "failed" || status === "killed") {
-          throw new Error(`Looker query failed with status: ${status}`);
+          // Looker stores the detailed query error (`errors[].message` or `[{ looker_error }]`)
+          // inside GET /api/4.0/query_tasks/{taskId}/results even when status === "error"
+          let detailedError: string | null = extractLookerQueryError(taskInfo);
+          if (!detailedError && status !== "killed") {
+            try {
+              const errResultsRes = await fetch(
+                `${root}/api/4.0/query_tasks/${taskId}/results`,
+                { headers, signal: abortController.signal }
+              );
+              const errBodyText = await errResultsRes.text();
+              detailedError = extractLookerQueryError(errBodyText);
+            } catch {
+              // Ignore secondary fetch error and fall back to status
+            }
+          }
+          throw new Error(
+            detailedError
+              ? `Looker query error: ${detailedError}`
+              : `Looker query failed with status: ${status}`
+          );
         }
       } catch (err: any) {
         if (isCanceled || err?.name === "AbortError") {
@@ -441,9 +539,15 @@ export async function runInlineQuery(
 
   if (!res.ok) {
     const errText = await res.text();
-    throw new Error(`Query failed (${res.status}): ${errText}`);
+    const detail = extractLookerQueryError(errText) || errText;
+    throw new Error(`Query failed (${res.status}): ${detail}`);
   }
 
   const raw = await res.json();
-  return normalizeQueryResult(raw, queryPayload.pivots, strategy).rows;
+  const inBandErr = extractLookerQueryError(raw);
+  const bundle = normalizeQueryResult(raw, queryPayload.pivots, strategy);
+  if (inBandErr && bundle.rows.length === 0) {
+    throw new Error(inBandErr);
+  }
+  return bundle.rows;
 }

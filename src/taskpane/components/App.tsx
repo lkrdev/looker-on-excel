@@ -615,7 +615,13 @@ export const App: React.FC = () => {
             ]
           : nonPivotDims;
 
+      const hasSelectedMeasures = selectedFields.some((fName) => {
+        const def = allAvailableFields.find((f) => f.name === fName);
+        return def?.category === "measure";
+      });
+
       const wantSubtotals =
+        hasSelectedMeasures &&
         (tableOptions.includeSubtotals ||
           (tableOptions.enableRowGroups && tableOptions.showGroupSubtotals !== false)) &&
         orderedNonPivotDims.length >= 2;
@@ -818,7 +824,14 @@ export const App: React.FC = () => {
         return isDim && !(activePivots || []).includes(fName);
       });
 
+      const hasSelectedMeasures = (basePayload.fields || []).some((fName) => {
+        const col = activeColumns.find((c) => c.fieldKey === fName);
+        const def = allAvailableFields.find((f) => f.name === fName);
+        return (col?.category || def?.category) === "measure";
+      });
+
       const wantSubtotals =
+        hasSelectedMeasures &&
         (mergedOptions.includeSubtotals ||
           (mergedOptions.enableRowGroups && mergedOptions.showGroupSubtotals !== false)) &&
         nonPivotDims.length >= 2;
