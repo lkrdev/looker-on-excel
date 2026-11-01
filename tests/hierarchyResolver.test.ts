@@ -55,6 +55,24 @@ const mockDimensions: FieldDefinition[] = [
     dimension_group: "orders.created",
     field_group_label: "Created Date",
   },
+  {
+    name: "orders.created_time",
+    label: "Orders Created Time",
+    label_short: "Created Time",
+    type: "date_time",
+    category: "dimension",
+    dimension_group: "orders.created",
+    field_group_label: "Created Date",
+  },
+  {
+    name: "orders.created_raw",
+    label: "Orders Created Raw",
+    label_short: "Created Raw",
+    type: "date_raw",
+    category: "dimension",
+    dimension_group: "orders.created",
+    field_group_label: "Created Date",
+  },
   // 2. Custom LookML tag hierarchy (`hierarchy:geo:1..3`)
   {
     name: "users.country",

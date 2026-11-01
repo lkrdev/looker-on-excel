@@ -33,7 +33,6 @@ import {
   resolveExploreHierarchies,
   getFieldHierarchyContext,
   expandFieldInSelection,
-  collapseFieldInSelection,
   applyHierarchyLadderToSelection,
 } from "../services/hierarchyResolver";
 
@@ -487,75 +486,6 @@ export const FieldPicker: React.FC<FieldPickerProps> = ({
                   )}
                   <span style={{ fontWeight: 500 }}>{def?.label || fieldKey}</span>
 
-                  {/* Hierarchy Drill / Collapse Badges for Dimensions */}
-                  {isDimension &&
-                    onReorderFields &&
-                    (() => {
-                      const hCtx = getFieldHierarchyContext(fieldKey, hierarchyLadders);
-                      if (!hCtx) return null;
-                      const canDrillChild =
-                        hCtx.childField && !selectedFields.includes(hCtx.childField);
-                      const childDef = hCtx.childField
-                        ? allFields.find((f) => f.name === hCtx.childField)
-                        : null;
-                      const canCollapseSelf =
-                        hCtx.parentField && selectedFields.includes(hCtx.parentField);
-
-                      return (
-                        <>
-                          {canDrillChild && (
-                            <span
-                              title={`Expand hierarchy to ${childDef?.label || hCtx.childField}`}
-                              style={{
-                                cursor: "pointer",
-                                fontSize: "10px",
-                                fontWeight: 600,
-                                padding: "1px 5px",
-                                borderRadius: "8px",
-                                backgroundColor: tokens.colorPaletteTealBackground2,
-                                color: tokens.colorPaletteTealForeground2,
-                              }}
-                              onClick={() => {
-                                const { fields } = expandFieldInSelection(
-                                  selectedFields,
-                                  fieldKey,
-                                  hierarchyLadders,
-                                  "insert_child"
-                                );
-                                onReorderFields(fields);
-                              }}
-                            >
-                              +Drill
-                            </span>
-                          )}
-                          {canCollapseSelf && (
-                            <span
-                              title={`Collapse ${def?.label || fieldKey} hierarchy level`}
-                              style={{
-                                cursor: "pointer",
-                                fontSize: "10px",
-                                fontWeight: 600,
-                                padding: "1px 5px",
-                                borderRadius: "8px",
-                                backgroundColor: tokens.colorNeutralBackground3,
-                                color: tokens.colorNeutralForeground2,
-                              }}
-                              onClick={() => {
-                                const { fields } = collapseFieldInSelection(
-                                  selectedFields,
-                                  hCtx.parentField!,
-                                  hierarchyLadders
-                                );
-                                onReorderFields(fields);
-                              }}
-                            >
-                              -Collapse
-                            </span>
-                          )}
-                        </>
-                      );
-                    })()}
-
                   {/* Pivot Toggle for Dimensions */}
                   {isDimension && onTogglePivot && (
                     <span
@@ -653,377 +583,7 @@ export const FieldPicker: React.FC<FieldPickerProps> = ({
         </div>
       )}
 
-      {/* Grouping (Row Groups / Indented Hierarchy Tree) Configuration Panel */}
-      {(nonPivotSelectedDims.length >= 2 || options?.enableRowGroups) && onOptionsChange && (
-        <div
-          style={{
-            padding: "10px 12px",
-            borderRadius: "6px",
-            border: `1px solid ${
-              options?.enableRowGroups ? tokens.colorBrandStroke1 : tokens.colorNeutralStroke1
-            }`,
-            backgroundColor: options?.enableRowGroups
-              ? tokens.colorBrandBackground2
-              : tokens.colorNeutralBackground2,
-            display: "flex",
-            flexDirection: "column",
-            gap: "8px",
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-            }}
-          >
-            <div style={{ display: "flex", flexDirection: "column" }}>
-              <Body2 style={{ fontWeight: 600, fontSize: "12px" }}>Grouping (Row Groups)</Body2>
-              <Caption1 style={{ color: tokens.colorNeutralForeground3, fontSize: "11px" }}>
-                Indented hierarchy tree in a single column with SQL subtotals
-              </Caption1>
-            </div>
-            <Switch
-              checked={Boolean(options?.enableRowGroups)}
-              onChange={(_, data) =>
-                onOptionsChange({
-                  enableRowGroups: data.checked,
-                  includeSubtotals: data.checked ? true : options?.includeSubtotals,
-                  rowGroupFields: orderedRowGroupDims,
-                  showGroupCounts: options?.showGroupCounts ?? true,
-                  showGroupSubtotals: options?.showGroupSubtotals ?? true,
-                  defaultDisplayLevel: options?.defaultDisplayLevel || "all_expanded",
-                })
-              }
-            />
-          </div>
-
-          {options?.enableRowGroups && (
-            <div
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                gap: "8px",
-                paddingTop: "6px",
-                borderTop: `1px solid ${tokens.colorNeutralStroke2}`,
-              }}
-            >
-              {/* Ordered Grouped Dimension Fields */}
-              <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-                <Caption1 style={{ fontWeight: 600, fontSize: "11px" }}>
-                  Grouped Hierarchy Levels ({orderedRowGroupDims.length})
-                </Caption1>
-                {orderedRowGroupDims.map((fieldKey, gIdx) => {
-                  const def = allFields.find((f) => f.name === fieldKey);
-                  return (
-                    <div
-                      key={fieldKey}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        padding: "4px 8px",
-                        borderRadius: "4px",
-                        backgroundColor: tokens.colorNeutralBackground1,
-                        border: `1px solid ${tokens.colorNeutralStroke2}`,
-                        fontSize: "12px",
-                      }}
-                    >
-                      <span style={{ fontWeight: 500 }}>
-                        {gIdx + 1}. {def?.label || fieldKey}
-                      </span>
-                      <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-                        {gIdx > 0 && (
-                          <span
-                            title="Move up hierarchy"
-                            style={{ cursor: "pointer", padding: "0 4px", fontWeight: 700 }}
-                            onClick={() => {
-                              const nextGroup = [...orderedRowGroupDims];
-                              const [moved] = nextGroup.splice(gIdx, 1);
-                              nextGroup.splice(gIdx - 1, 0, moved);
-                              onOptionsChange({ rowGroupFields: nextGroup });
-                              if (onReorderFields) {
-                                const others = selectedFields.filter(
-                                  (f) => !nextGroup.includes(f)
-                                );
-                                onReorderFields([...nextGroup, ...others]);
-                              }
-                            }}
-                          >
-                            ↑
-                          </span>
-                        )}
-                        {gIdx < orderedRowGroupDims.length - 1 && (
-                          <span
-                            title="Move down hierarchy"
-                            style={{ cursor: "pointer", padding: "0 4px", fontWeight: 700 }}
-                            onClick={() => {
-                              const nextGroup = [...orderedRowGroupDims];
-                              const [moved] = nextGroup.splice(gIdx, 1);
-                              nextGroup.splice(gIdx + 1, 0, moved);
-                              onOptionsChange({ rowGroupFields: nextGroup });
-                              if (onReorderFields) {
-                                const others = selectedFields.filter(
-                                  (f) => !nextGroup.includes(f)
-                                );
-                                onReorderFields([...nextGroup, ...others]);
-                              }
-                            }}
-                          >
-                            ↓
-                          </span>
-                        )}
-                        <DismissRegular
-                          style={{ cursor: "pointer", fontSize: "12px" }}
-                          onClick={() => onToggleField(fieldKey)}
-                        />
-                      </div>
-                    </div>
-                  );
-                })}
-
-                {/* Quick button to add next LookML hierarchy level if available */}
-                {orderedRowGroupDims.length > 0 &&
-                  onReorderFields &&
-                  (() => {
-                    const deepestKey = orderedRowGroupDims[orderedRowGroupDims.length - 1];
-                    const hCtx = getFieldHierarchyContext(deepestKey, hierarchyLadders);
-                    if (!hCtx || !hCtx.childField || selectedFields.includes(hCtx.childField)) {
-                      return null;
-                    }
-                    const childDef = allFields.find((f) => f.name === hCtx.childField);
-                    return (
-                      <Button
-                        size="small"
-                        appearance="outline"
-                        onClick={() => {
-                          const { fields } = expandFieldInSelection(
-                            selectedFields,
-                            deepestKey,
-                            hierarchyLadders,
-                            "insert_child"
-                          );
-                          onReorderFields(fields);
-                          onOptionsChange({
-                            rowGroupFields: [...orderedRowGroupDims, hCtx.childField!],
-                          });
-                        }}
-                      >
-                        + Add Level: {childDef?.label_short || childDef?.label || hCtx.childField}
-                      </Button>
-                    );
-                  })()}
-              </div>
-
-              {/* Default Display Level */}
-              <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
-                <Caption1 style={{ fontWeight: 600, fontSize: "11px" }}>
-                  Default Display Level
-                </Caption1>
-                <Select
-                  size="small"
-                  value={options.defaultDisplayLevel || "all_expanded"}
-                  onChange={(_, data) =>
-                    onOptionsChange({
-                      defaultDisplayLevel: data.value as RowGroupDisplayLevel,
-                    })
-                  }
-                >
-                  <option value="all_collapsed">All Collapsed</option>
-                  <option value="level_1">Level 1</option>
-                  <option value="level_2">Level 2</option>
-                  <option value="level_3">Level 3</option>
-                  <option value="all_expanded">All Expanded</option>
-                </Select>
-              </div>
-
-              {/* Group Column Header */}
-              <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
-                <Caption1 style={{ fontWeight: 600, fontSize: "11px" }}>
-                  Group Column Header
-                </Caption1>
-                <Input
-                  size="small"
-                  placeholder="Leave blank for default ('Group')"
-                  value={options.groupColumnHeader || ""}
-                  onChange={(_, data) => onOptionsChange({ groupColumnHeader: data.value })}
-                />
-              </div>
-
-              {/* Show Group Counts & Show Subtotals */}
-              <div style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}>
-                <Checkbox
-                  size="medium"
-                  checked={options.showGroupCounts !== false}
-                  onChange={(_, data) =>
-                    onOptionsChange({ showGroupCounts: Boolean(data.checked) })
-                  }
-                  label={<Caption1 style={{ fontWeight: 600 }}>Show Group Counts</Caption1>}
-                />
-                <Checkbox
-                  size="medium"
-                  checked={options.showGroupSubtotals !== false}
-                  onChange={(_, data) =>
-                    onOptionsChange({ showGroupSubtotals: Boolean(data.checked) })
-                  }
-                  label={<Caption1 style={{ fontWeight: 600 }}>Show Subtotals</Caption1>}
-                />
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* First-Class LookML Hierarchies Section (Tag & Time Hierarchies) */}
-      {hierarchyLadders.length > 0 && !searchTerm.trim() && onReorderFields && (
-        <div
-          style={{
-            padding: "8px 10px",
-            borderRadius: "6px",
-            border: `1px solid ${tokens.colorNeutralStroke2}`,
-            backgroundColor: tokens.colorNeutralBackground2,
-            display: "flex",
-            flexDirection: "column",
-            gap: "6px",
-          }}
-        >
-          <Caption1 style={{ fontWeight: 600, color: tokens.colorBrandForeground1 }}>
-            Hierarchies ({hierarchyLadders.length})
-          </Caption1>
-          {hierarchyLadders.map((ladder) => {
-            const activeLevels = ladder.levels.filter((lv) => selectedFields.includes(lv));
-            const isHierarchyActive = activeLevels.length >= 2;
-            const levelLabels = ladder.levels.map((lv) => {
-              const d = dimensions.find((dim) => dim.name === lv);
-              return d?.label_short || d?.label || lv;
-            });
-
-            return (
-              <div
-                key={ladder.id}
-                style={{
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: "4px",
-                  padding: "6px 8px",
-                  borderRadius: "4px",
-                  backgroundColor: tokens.colorNeutralBackground1,
-                  border: `1px solid ${
-                    isHierarchyActive ? tokens.colorBrandStroke1 : tokens.colorNeutralStroke2
-                  }`,
-                }}
-              >
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    gap: "6px",
-                  }}
-                >
-                  <Checkbox
-                    checked={isHierarchyActive}
-                    onChange={(_, data) => {
-                      if (data.checked) {
-                        const { fields, rowGroupFields } = applyHierarchyLadderToSelection(
-                          selectedFields,
-                          ladder,
-                          allFields,
-                          Math.min(3, ladder.levels.length)
-                        );
-                        onReorderFields(fields);
-                        if (onOptionsChange) {
-                          onOptionsChange({
-                            enableRowGroups: true,
-                            includeSubtotals: true,
-                            rowGroupFields,
-                            showGroupCounts: true,
-                            showGroupSubtotals: true,
-                            defaultDisplayLevel: "level_1",
-                          });
-                        }
-                      } else {
-                        const ladderSet = new Set(ladder.levels);
-                        const next = selectedFields.filter((f) => !ladderSet.has(f));
-                        onReorderFields(next);
-                        if (onOptionsChange) {
-                          onOptionsChange({ enableRowGroups: false, rowGroupFields: [] });
-                        }
-                      }
-                    }}
-                    label={
-                      <Body2 style={{ fontWeight: 600, fontSize: "12px" }}>{ladder.label}</Body2>
-                    }
-                  />
-                  <Badge size="small" appearance="tint" color="brand">
-                    {ladder.source === "tag"
-                      ? "LookML Tag"
-                      : ladder.source === "dimension_group"
-                      ? "Time"
-                      : "Drill"}
-                  </Badge>
-                </div>
-                <Caption1
-                  style={{
-                    fontSize: "11px",
-                    color: tokens.colorNeutralForeground3,
-                    paddingLeft: "26px",
-                  }}
-                >
-                  {levelLabels.join(" ▸ ")}
-                </Caption1>
-                {ladder.levels.length > 2 && (
-                  <div
-                    style={{
-                      display: "flex",
-                      gap: "4px",
-                      paddingLeft: "26px",
-                      flexWrap: "wrap",
-                    }}
-                  >
-                    {[2, 3, ladder.levels.length]
-                      .filter((v, idx, arr) => v <= ladder.levels.length && arr.indexOf(v) === idx)
-                      .map((depth) => (
-                        <Button
-                          key={depth}
-                          size="small"
-                          appearance={
-                            isHierarchyActive && activeLevels.length === depth
-                              ? "primary"
-                              : "subtle"
-                          }
-                          style={{ fontSize: "10px", padding: "1px 6px", minWidth: 0 }}
-                          onClick={() => {
-                            const { fields, rowGroupFields } = applyHierarchyLadderToSelection(
-                              selectedFields,
-                              ladder,
-                              allFields,
-                              depth
-                            );
-                            onReorderFields(fields);
-                            if (onOptionsChange) {
-                              onOptionsChange({
-                                enableRowGroups: true,
-                                includeSubtotals: true,
-                                rowGroupFields,
-                                showGroupCounts: true,
-                                showGroupSubtotals: true,
-                              });
-                            }
-                          }}
-                        >
-                          {depth === ladder.levels.length ? `All (${depth})` : `${depth} Levels`}
-                        </Button>
-                      ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* Grouped Tree Accordion */}
+      {/* Grouped Tree Accordion (Views) */}
       <div style={{ maxHeight: "300px", overflowY: "auto" }}>
         <Accordion
           collapsible
@@ -1078,6 +638,419 @@ export const FieldPicker: React.FC<FieldPickerProps> = ({
           ))}
         </Accordion>
       </div>
+
+      {/* Collapsed-by-default Hierarchies & Row Grouping Section (Below Views) */}
+      {(hierarchyLadders.length > 0 || nonPivotSelectedDims.length >= 2 || options?.enableRowGroups) &&
+        !searchTerm.trim() && (
+          <Accordion collapsible defaultOpenItems={[]}>
+            <AccordionItem value="hierarchies">
+              <AccordionHeader size="small">
+                Hierarchies & Row Grouping
+                {hierarchyLadders.length > 0 ? ` (${hierarchyLadders.length})` : ""}
+                {options?.enableRowGroups ? " • Active" : ""}
+              </AccordionHeader>
+              <AccordionPanel>
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                  {/* LookML Hierarchies Presets */}
+                  {hierarchyLadders.length > 0 && onReorderFields && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                      {hierarchyLadders.map((ladder) => {
+                        const activeLevels = ladder.levels.filter((lv) =>
+                          selectedFields.includes(lv)
+                        );
+                        const isHierarchyActive = activeLevels.length >= 2;
+                        const levelLabels = ladder.levels.map((lv) => {
+                          const d = dimensions.find((dim) => dim.name === lv);
+                          return d?.label_short || d?.label || lv;
+                        });
+
+                        return (
+                          <div
+                            key={ladder.id}
+                            style={{
+                              display: "flex",
+                              flexDirection: "column",
+                              gap: "2px",
+                              padding: "4px 6px",
+                              borderRadius: "4px",
+                              backgroundColor: tokens.colorNeutralBackground2,
+                            }}
+                          >
+                            <div
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "space-between",
+                                gap: "6px",
+                              }}
+                            >
+                              <Checkbox
+                                checked={isHierarchyActive}
+                                onChange={(_, data) => {
+                                  if (data.checked) {
+                                    const { fields, rowGroupFields } =
+                                      applyHierarchyLadderToSelection(
+                                        selectedFields,
+                                        ladder,
+                                        allFields,
+                                        Math.min(3, ladder.levels.length)
+                                      );
+                                    onReorderFields(fields);
+                                    if (onOptionsChange) {
+                                      onOptionsChange({
+                                        enableRowGroups: true,
+                                        includeSubtotals: true,
+                                        rowGroupFields,
+                                        showGroupCounts: true,
+                                        showGroupSubtotals: true,
+                                        defaultDisplayLevel: "level_1",
+                                      });
+                                    }
+                                  } else {
+                                    const ladderSet = new Set(ladder.levels);
+                                    const next = selectedFields.filter((f) => !ladderSet.has(f));
+                                    onReorderFields(next);
+                                    if (onOptionsChange) {
+                                      onOptionsChange({
+                                        enableRowGroups: false,
+                                        rowGroupFields: [],
+                                      });
+                                    }
+                                  }
+                                }}
+                                label={
+                                  <Body2 style={{ fontSize: "12px" }}>{ladder.label}</Body2>
+                                }
+                              />
+                              <Badge size="small" appearance="outline" color="subtle">
+                                {ladder.source === "tag"
+                                  ? "Tag"
+                                  : ladder.source === "dimension_group"
+                                  ? "Time"
+                                  : "Drill"}
+                              </Badge>
+                            </div>
+                            <Caption1
+                              style={{
+                                fontSize: "10px",
+                                color: tokens.colorNeutralForeground3,
+                                paddingLeft: "26px",
+                              }}
+                            >
+                              {levelLabels.join(" ▸ ")}
+                            </Caption1>
+                            {isHierarchyActive && ladder.levels.length > 2 && (
+                              <div
+                                style={{
+                                  display: "flex",
+                                  gap: "4px",
+                                  paddingLeft: "26px",
+                                  flexWrap: "wrap",
+                                  marginTop: "2px",
+                                }}
+                              >
+                                {[2, 3, ladder.levels.length]
+                                  .filter(
+                                    (v, idx, arr) =>
+                                      v <= ladder.levels.length && arr.indexOf(v) === idx
+                                  )
+                                  .map((depth) => (
+                                    <Button
+                                      key={depth}
+                                      size="small"
+                                      appearance={
+                                        activeLevels.length === depth ? "primary" : "subtle"
+                                      }
+                                      style={{
+                                        fontSize: "10px",
+                                        padding: "1px 6px",
+                                        minWidth: 0,
+                                      }}
+                                      onClick={() => {
+                                        const { fields, rowGroupFields } =
+                                          applyHierarchyLadderToSelection(
+                                            selectedFields,
+                                            ladder,
+                                            allFields,
+                                            depth
+                                          );
+                                        onReorderFields(fields);
+                                        if (onOptionsChange) {
+                                          onOptionsChange({
+                                            enableRowGroups: true,
+                                            includeSubtotals: true,
+                                            rowGroupFields,
+                                            showGroupCounts: true,
+                                            showGroupSubtotals: true,
+                                          });
+                                        }
+                                      }}
+                                    >
+                                      {depth === ladder.levels.length
+                                        ? `All (${depth})`
+                                        : `${depth} Levels`}
+                                    </Button>
+                                  ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Row Groups / Indented Hierarchy Tree Configuration */}
+                  {(nonPivotSelectedDims.length >= 2 || options?.enableRowGroups) &&
+                    onOptionsChange && (
+                      <div
+                        style={{
+                          padding: "8px 10px",
+                          borderRadius: "4px",
+                          border: `1px solid ${tokens.colorNeutralStroke2}`,
+                          backgroundColor: tokens.colorNeutralBackground2,
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: "8px",
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                          }}
+                        >
+                          <Body2 style={{ fontWeight: 600, fontSize: "12px" }}>
+                            Enable Row Groups
+                          </Body2>
+                          <Switch
+                            checked={Boolean(options?.enableRowGroups)}
+                            onChange={(_, data) =>
+                              onOptionsChange({
+                                enableRowGroups: data.checked,
+                                includeSubtotals: data.checked ? true : options?.includeSubtotals,
+                                rowGroupFields: orderedRowGroupDims,
+                                showGroupCounts: options?.showGroupCounts ?? true,
+                                showGroupSubtotals: options?.showGroupSubtotals ?? true,
+                                defaultDisplayLevel:
+                                  options?.defaultDisplayLevel || "all_expanded",
+                              })
+                            }
+                          />
+                        </div>
+
+                        {options?.enableRowGroups && (
+                          <div
+                            style={{
+                              display: "flex",
+                              flexDirection: "column",
+                              gap: "8px",
+                              paddingTop: "6px",
+                              borderTop: `1px solid ${tokens.colorNeutralStroke2}`,
+                            }}
+                          >
+                            {/* Ordered Grouped Dimension Fields */}
+                            <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                              <Caption1 style={{ fontWeight: 600, fontSize: "11px" }}>
+                                Grouped Hierarchy Levels ({orderedRowGroupDims.length})
+                              </Caption1>
+                              {orderedRowGroupDims.map((fieldKey, gIdx) => {
+                                const def = allFields.find((f) => f.name === fieldKey);
+                                return (
+                                  <div
+                                    key={fieldKey}
+                                    style={{
+                                      display: "flex",
+                                      alignItems: "center",
+                                      justifyContent: "space-between",
+                                      padding: "3px 8px",
+                                      borderRadius: "4px",
+                                      backgroundColor: tokens.colorNeutralBackground1,
+                                      border: `1px solid ${tokens.colorNeutralStroke2}`,
+                                      fontSize: "12px",
+                                    }}
+                                  >
+                                    <span style={{ fontWeight: 500 }}>
+                                      {gIdx + 1}. {def?.label || fieldKey}
+                                    </span>
+                                    <div
+                                      style={{ display: "flex", alignItems: "center", gap: "4px" }}
+                                    >
+                                      {gIdx > 0 && (
+                                        <span
+                                          title="Move up hierarchy"
+                                          style={{
+                                            cursor: "pointer",
+                                            padding: "0 4px",
+                                            fontWeight: 700,
+                                          }}
+                                          onClick={() => {
+                                            const nextGroup = [...orderedRowGroupDims];
+                                            const [moved] = nextGroup.splice(gIdx, 1);
+                                            nextGroup.splice(gIdx - 1, 0, moved);
+                                            onOptionsChange({ rowGroupFields: nextGroup });
+                                            if (onReorderFields) {
+                                              const others = selectedFields.filter(
+                                                (f) => !nextGroup.includes(f)
+                                              );
+                                              onReorderFields([...nextGroup, ...others]);
+                                            }
+                                          }}
+                                        >
+                                          ↑
+                                        </span>
+                                      )}
+                                      {gIdx < orderedRowGroupDims.length - 1 && (
+                                        <span
+                                          title="Move down hierarchy"
+                                          style={{
+                                            cursor: "pointer",
+                                            padding: "0 4px",
+                                            fontWeight: 700,
+                                          }}
+                                          onClick={() => {
+                                            const nextGroup = [...orderedRowGroupDims];
+                                            const [moved] = nextGroup.splice(gIdx, 1);
+                                            nextGroup.splice(gIdx + 1, 0, moved);
+                                            onOptionsChange({ rowGroupFields: nextGroup });
+                                            if (onReorderFields) {
+                                              const others = selectedFields.filter(
+                                                (f) => !nextGroup.includes(f)
+                                              );
+                                              onReorderFields([...nextGroup, ...others]);
+                                            }
+                                          }}
+                                        >
+                                          ↓
+                                        </span>
+                                      )}
+                                      <DismissRegular
+                                        style={{ cursor: "pointer", fontSize: "12px" }}
+                                        onClick={() => onToggleField(fieldKey)}
+                                      />
+                                    </div>
+                                  </div>
+                                );
+                              })}
+
+                              {/* Quick button to add next LookML hierarchy level if available */}
+                              {orderedRowGroupDims.length > 0 &&
+                                onReorderFields &&
+                                (() => {
+                                  const deepestKey =
+                                    orderedRowGroupDims[orderedRowGroupDims.length - 1];
+                                  const hCtx = getFieldHierarchyContext(
+                                    deepestKey,
+                                    hierarchyLadders
+                                  );
+                                  if (
+                                    !hCtx ||
+                                    !hCtx.childField ||
+                                    selectedFields.includes(hCtx.childField)
+                                  ) {
+                                    return null;
+                                  }
+                                  const childDef = allFields.find(
+                                    (f) => f.name === hCtx.childField
+                                  );
+                                  return (
+                                    <Button
+                                      size="small"
+                                      appearance="outline"
+                                      onClick={() => {
+                                        const { fields } = expandFieldInSelection(
+                                          selectedFields,
+                                          deepestKey,
+                                          hierarchyLadders,
+                                          "insert_child"
+                                        );
+                                        onReorderFields(fields);
+                                        onOptionsChange({
+                                          rowGroupFields: [
+                                            ...orderedRowGroupDims,
+                                            hCtx.childField!,
+                                          ],
+                                        });
+                                      }}
+                                    >
+                                      + Add Level:{" "}
+                                      {childDef?.label_short ||
+                                        childDef?.label ||
+                                        hCtx.childField}
+                                    </Button>
+                                  );
+                                })()}
+                            </div>
+
+                            {/* Default Display Level */}
+                            <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
+                              <Caption1 style={{ fontWeight: 600, fontSize: "11px" }}>
+                                Default Display Level
+                              </Caption1>
+                              <Select
+                                size="small"
+                                value={options.defaultDisplayLevel || "all_expanded"}
+                                onChange={(_, data) =>
+                                  onOptionsChange({
+                                    defaultDisplayLevel: data.value as RowGroupDisplayLevel,
+                                  })
+                                }
+                              >
+                                <option value="all_collapsed">All Collapsed</option>
+                                <option value="level_1">Level 1</option>
+                                <option value="level_2">Level 2</option>
+                                <option value="level_3">Level 3</option>
+                                <option value="all_expanded">All Expanded</option>
+                              </Select>
+                            </div>
+
+                            {/* Group Column Header */}
+                            <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
+                              <Caption1 style={{ fontWeight: 600, fontSize: "11px" }}>
+                                Group Column Header
+                              </Caption1>
+                              <Input
+                                size="small"
+                                placeholder="Leave blank for default ('Group')"
+                                value={options.groupColumnHeader || ""}
+                                onChange={(_, data) =>
+                                  onOptionsChange({ groupColumnHeader: data.value })
+                                }
+                              />
+                            </div>
+
+                            {/* Show Group Counts & Show Subtotals */}
+                            <div style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}>
+                              <Checkbox
+                                size="medium"
+                                checked={options.showGroupCounts !== false}
+                                onChange={(_, data) =>
+                                  onOptionsChange({ showGroupCounts: Boolean(data.checked) })
+                                }
+                                label={
+                                  <Caption1 style={{ fontWeight: 600 }}>Show Group Counts</Caption1>
+                                }
+                              />
+                              <Checkbox
+                                size="medium"
+                                checked={options.showGroupSubtotals !== false}
+                                onChange={(_, data) =>
+                                  onOptionsChange({ showGroupSubtotals: Boolean(data.checked) })
+                                }
+                                label={
+                                  <Caption1 style={{ fontWeight: 600 }}>Show Subtotals</Caption1>
+                                }
+                              />
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                </div>
+              </AccordionPanel>
+            </AccordionItem>
+          </Accordion>
+        )}
     </div>
   );
 };
