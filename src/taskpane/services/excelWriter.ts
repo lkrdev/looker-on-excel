@@ -116,12 +116,33 @@ export interface CrosstabHeaderMatrix {
   merges: CrosstabHeaderMerge[];
 }
 
+const CELL_METADATA_KEYS = new Set([
+  "value",
+  "rendered",
+  "html",
+  "has_custom_html",
+  "links",
+  "filterable_value",
+  "drill_fields",
+]);
+
 function isNestedPivotObject(val: any): boolean {
   if (val && typeof val === "object" && !Array.isArray(val)) {
     const entries = Object.entries(val).filter(([k]) => k !== "$$$_row_total_$$$");
     if (entries.length === 0) return false;
+    // Never treat a Looker json_detail leaf cell object as a pivot dimension map
+    if (entries.some(([k]) => CELL_METADATA_KEYS.has(k) || k === "__pivot_key__")) {
+      return false;
+    }
     const firstInner = entries[0][1];
-    return Boolean(firstInner && typeof firstInner === "object");
+    if (!firstInner || typeof firstInner !== "object" || Array.isArray(firstInner)) {
+      return false;
+    }
+    const innerKeys = Object.keys(firstInner);
+    if (innerKeys.some((ik) => CELL_METADATA_KEYS.has(ik))) {
+      return false;
+    }
+    return true;
   }
   return false;
 }
@@ -1190,6 +1211,12 @@ export async function writeLookerDataToWorksheet(
             if (val === null || val === undefined) {
               return nullVal;
             }
+            if (typeof val === "object") {
+              if ("value" in val && (val.value === null || typeof val.value !== "object")) {
+                return val.value ?? nullVal;
+              }
+              return nullVal;
+            }
             return val;
           })
         );
@@ -1389,14 +1416,14 @@ export async function writeLookerDataToWorksheet(
       }
     } finally {
       // 10. Always restore calculation mode
-      if (prevCalcMode) {
-        try {
+      try {
+        if (prevCalcMode) {
           app.calculationMode = prevCalcMode;
-        } catch (e) {
-          console.warn("Could not restore calculationMode:", e);
         }
+        await context.sync();
+      } catch (e) {
+        console.warn("Could not restore calculationMode:", e);
       }
-      await context.sync();
     }
   });
 
