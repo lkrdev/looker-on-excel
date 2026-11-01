@@ -9,7 +9,7 @@ import {
   Button,
 } from "@fluentui/react-components";
 import { DismissRegular } from "@fluentui/react-icons";
-import { Header } from "./Header";
+import { Header, NavigationMode } from "./Header";
 import { AuthView } from "./AuthView";
 import { ModelSelector } from "./ModelSelector";
 import { PromptsDialog } from "./PromptsDialog";
@@ -23,12 +23,15 @@ import {
 import { TableSettings } from "./TableSettings";
 import { ExecutionBar } from "./ExecutionBar";
 import { RefreshView } from "./RefreshView";
+import { LooksBrowser } from "./LooksBrowser";
+import { DashboardsBrowser } from "./DashboardsBrowser";
 
 import { getStoredAuth, clearAuth, ensureValidToken, AuthTokens } from "../services/lookerAuth";
 import {
   getModels,
   getExplore,
   getCurrentUser,
+  orderFieldsDimensionsFirst,
   ModelSummary,
   ExploreDetail,
   UserSummary,
@@ -75,8 +78,9 @@ export const App: React.FC = () => {
   const [auth, setAuth] = useState<AuthTokens | null>(() => getStoredAuth());
   const [user, setUser] = useState<UserSummary | null>(null);
 
-  // View state: 'builder' | 'refresh'
+  // View state: 'builder' | 'refresh' and top NavigationMode: 'explore' | 'looks' | 'dashboards'
   const [activeView, setActiveView] = useState<"builder" | "refresh">("builder");
+  const [navMode, setNavMode] = useState<NavigationMode>("explore");
   const [sheetConfig, setSheetConfig] = useState<StoredSheetConfig | null>(null);
   const [allSheetTables, setAllSheetTables] = useState<StoredSheetConfig[]>([]);
   const [sourceSheetId, setSourceSheetId] = useState<string | null>(null);
@@ -122,6 +126,7 @@ export const App: React.FC = () => {
   const sourceSheetIdRef = useRef<string | null>(null);
   const preferredTableIdRef = useRef<string | null>(null);
   const skipDefaultPromptsRef = useRef<boolean>(false);
+  const pendingFieldOrderRef = useRef<boolean>(false);
 
   // Validate / refresh token on taskpane mount / relaunch of Excel
   useEffect(() => {
@@ -251,6 +256,14 @@ export const App: React.FC = () => {
       .then((data) => {
         setExploreDetail(data);
 
+        if (pendingFieldOrderRef.current) {
+          pendingFieldOrderRef.current = false;
+          const allDefs = [...data.fields.dimensions, ...data.fields.measures];
+          setSelectedFields((prev) =>
+            orderFieldsDimensionsFirst(prev, allDefs, pivots)
+          );
+        }
+
         // Pre-fill defaults for any required always_filter unless hydrating from handleEditQuery
         if (skipDefaultPromptsRef.current) {
           skipDefaultPromptsRef.current = false;
@@ -295,6 +308,17 @@ export const App: React.FC = () => {
         setSorts((s) => s.filter((x) => x !== fieldName && !x.startsWith(`${fieldName} `)));
         setPivots((p) => p.filter((x) => x !== fieldName));
         return prev.filter((f) => f !== fieldName);
+      }
+      // Keep Dimensions before Measures by default when adding a new Dimension
+      const isDim = exploreDetail?.fields.dimensions.some((d) => d.name === fieldName);
+      if (isDim && exploreDetail) {
+        const measureSet = new Set(exploreDetail.fields.measures.map((m) => m.name));
+        const firstMeasureIdx = prev.findIndex((f) => measureSet.has(f));
+        if (firstMeasureIdx !== -1) {
+          const next = [...prev];
+          next.splice(firstMeasureIdx, 0, fieldName);
+          return next;
+        }
       }
       return [...prev, fieldName];
     });
@@ -571,7 +595,8 @@ export const App: React.FC = () => {
         columns,
         dataRows,
         pivots.length > 0 ? pivots : undefined,
-        Boolean(tableOptions.includeRowTotals && pivots.length > 0)
+        Boolean(tableOptions.includeRowTotals && pivots.length > 0),
+        bundle.pivotsMeta
       ).expandedColumns.length;
 
       const targetSheetId =
@@ -596,6 +621,7 @@ export const App: React.FC = () => {
         targetSheetId,
         sheetName: exploreDetail.label || selectedExplore || "Looker Data",
         pivots: pivots.length > 0 ? pivots : undefined,
+        pivotsMeta: bundle.pivotsMeta,
         prevRowCount: destination === "active" ? sheetConfig?.rowCount : undefined,
         prevColCount:
           destination === "active"
@@ -689,7 +715,8 @@ export const App: React.FC = () => {
         sheetConfig.columns,
         dataRows,
         activePivots,
-        Boolean(sheetConfig.queryPayload.row_total)
+        Boolean(sheetConfig.queryPayload.row_total),
+        bundle.pivotsMeta
       ).expandedColumns.length;
 
       const effectiveAnchor = (
@@ -717,6 +744,7 @@ export const App: React.FC = () => {
           destination: "active",
           targetSheetId: sourceSheetId || undefined,
           pivots: activePivots,
+          pivotsMeta: bundle.pivotsMeta,
           prevRowCount: sheetConfig.rowCount,
           prevColCount: sheetConfig.options?.prevColCount ?? sheetConfig.columns.length,
           totalsData: bundle.totalsData,
@@ -786,7 +814,8 @@ export const App: React.FC = () => {
           s.config.columns,
           dataRows,
           sPivots,
-          Boolean(s.config.queryPayload.row_total)
+          Boolean(s.config.queryPayload.row_total),
+          bundle.pivotsMeta
         ).expandedColumns.length;
 
         const effectiveAnchor = (
@@ -813,6 +842,7 @@ export const App: React.FC = () => {
             destination: "active",
             targetSheetId: s.sheetId,
             pivots: sPivots,
+            pivotsMeta: bundle.pivotsMeta,
             prevRowCount: s.config.rowCount,
             prevColCount: s.config.options?.prevColCount ?? s.config.columns.length,
             totalsData: bundle.totalsData,
@@ -861,6 +891,210 @@ export const App: React.FC = () => {
     }
   };
 
+  // Load a Saved Look or Dashboard Tile query into the Explore Builder
+  const handleOpenPayloadInExplore = (payload: QueryPayload) => {
+    skipDefaultPromptsRef.current = true;
+    const isSameExplore =
+      exploreDetail &&
+      payload.model === selectedModel &&
+      payload.view === selectedExplore;
+    const initialOrderedFields =
+      isSameExplore && exploreDetail
+        ? orderFieldsDimensionsFirst(
+            payload.fields || [],
+            [...exploreDetail.fields.dimensions, ...exploreDetail.fields.measures],
+            payload.pivots
+          )
+        : payload.fields || [];
+    if (!isSameExplore) {
+      pendingFieldOrderRef.current = true;
+    }
+
+    setSelectedModel(payload.model);
+    setSelectedExplore(payload.view);
+    setSelectedFields(initialOrderedFields);
+    setSorts(payload.sorts || []);
+    setPivots(payload.pivots || []);
+    setRowLimit(payload.limit || "500");
+    setTableOptions((prev) => ({
+      ...prev,
+      includeTotals: Boolean(payload.total),
+      includeRowTotals: Boolean(payload.row_total),
+      includeSubtotals: Boolean(payload.subtotals && payload.subtotals.length > 0),
+    }));
+
+    const restoredFilters: FilterCondition[] = [];
+    if (payload.filters) {
+      Object.entries(payload.filters).forEach(([field, expr], idx) => {
+        restoredFilters.push({
+          id: `${Date.now()}_${idx}`,
+          field,
+          operator: "matches_advanced",
+          value: expr,
+        });
+      });
+    }
+    setFilters(restoredFilters);
+    setPromptValues({});
+    setNavMode("explore");
+    setActiveView("builder");
+  };
+
+  // Directly import a Saved Look or Dashboard Tile QueryPayload into Excel
+  const handleImportExternalPayload = async (
+    payload: QueryPayload,
+    sheetTitle: string,
+    forceNewSheet: boolean = false
+  ): Promise<void> => {
+    if (!auth) return;
+    setIsExecuting(true);
+    setStatusText(`Running "${sheetTitle}" in warehouse...`);
+    setProgressPercent(0);
+    setErrorMessage(null);
+
+    try {
+      const validAuth = await ensureValidToken(auth);
+      if (validAuth.accessToken !== auth.accessToken) {
+        setAuth(validAuth);
+      }
+
+      // Fetch explore metadata to resolve friendly labels and number formats
+      let expMeta: ExploreDetail | null = null;
+      try {
+        expMeta = await getExplore(
+          validAuth.baseUrl,
+          validAuth.accessToken,
+          payload.model,
+          payload.view
+        );
+      } catch {
+        // Fallback to raw field names if explore metadata fails
+      }
+
+      const allAvailableFields = expMeta
+        ? [...expMeta.fields.dimensions, ...expMeta.fields.measures]
+        : [];
+
+      // Normalize field order so Dimensions always precede Measures (Looker API returns raw click order)
+      const orderedFieldKeys = orderFieldsDimensionsFirst(
+        payload.fields || [],
+        allAvailableFields,
+        payload.pivots
+      );
+      const orderedPayload: QueryPayload = {
+        ...payload,
+        fields: orderedFieldKeys,
+      };
+
+      const columns: ColumnDefinition[] = orderedFieldKeys.map((fieldKey) => {
+        const def = allAvailableFields.find((f) => f.name === fieldKey);
+        return {
+          fieldKey,
+          label: def?.label || fieldKey,
+          type: def?.type,
+          excelFormat: def ? resolveExcelNumberFormat(def) : undefined,
+          category: def?.category,
+        };
+      });
+
+      const controller = await runQueryTask(
+        validAuth.baseUrl,
+        validAuth.accessToken,
+        orderedPayload
+      );
+      activeTaskRef.current = controller;
+
+      const bundle = await controller.waitForBundle((_, elapsed) => {
+        setStatusText(`Running "${sheetTitle}"... (${elapsed}s)`);
+      });
+      const dataRows = bundle.rows;
+
+      const expandedColCount = expandPivotedColumns(
+        columns,
+        dataRows,
+        orderedPayload.pivots || undefined,
+        Boolean(orderedPayload.row_total),
+        bundle.pivotsMeta
+      ).expandedColumns.length;
+
+      const effectiveDest = forceNewSheet ? "new" : destination;
+      const effectiveAnchor =
+        effectiveDest === "new" ? "A1" : (tableOptions.anchorCell || "A1").toUpperCase();
+      const effectiveTableId =
+        effectiveDest === "new"
+          ? "Looker_A1"
+          : tableOptions.tableId || `Looker_${effectiveAnchor}`;
+      const siblingRanges =
+        effectiveDest === "active"
+          ? getSiblingTableBoundingBoxes(allSheetTables, effectiveTableId, effectiveAnchor)
+          : [];
+
+      const writeOptions: WriteOptions = {
+        ...tableOptions,
+        anchorCell: effectiveAnchor,
+        tableId: effectiveTableId,
+        siblingTableRanges: siblingRanges,
+        destination: effectiveDest,
+        sheetName: sheetTitle,
+        pivots: orderedPayload.pivots || undefined,
+        pivotsMeta: bundle.pivotsMeta,
+        includeTotals: Boolean(orderedPayload.total),
+        includeRowTotals: Boolean(orderedPayload.row_total),
+        includeSubtotals: Boolean(orderedPayload.subtotals && orderedPayload.subtotals.length > 0),
+        totalsData: bundle.totalsData,
+        subtotalsData: bundle.subtotalsData,
+      };
+
+      const writtenSheetId = await writeLookerDataToWorksheet(
+        columns,
+        dataRows,
+        writeOptions,
+        (pct) => setProgressPercent(pct)
+      );
+
+      const totalWrittenDataRows =
+        dataRows.length +
+        (bundle.subtotalsData ? Object.values(bundle.subtotalsData).flat().length : 0) +
+        (bundle.totalsData ? 1 : 0);
+
+      const config: StoredSheetConfig = {
+        tableId: effectiveTableId,
+        anchorCell: effectiveAnchor,
+        queryPayload: orderedPayload,
+        columns,
+        options: {
+          ...writeOptions,
+          totalsData: undefined,
+          subtotalsData: undefined,
+          siblingTableRanges: undefined,
+          destination: "active",
+          targetSheetId: undefined,
+          prevRowCount: totalWrittenDataRows,
+          prevColCount: expandedColCount,
+        },
+        lastRefreshed: new Date().toISOString(),
+        rowCount: totalWrittenDataRows,
+        modelLabel: payload.model,
+        exploreLabel: sheetTitle || expMeta?.label || payload.view,
+      };
+
+      await saveSheetMetadata(config, writtenSheetId);
+      preferredTableIdRef.current = effectiveTableId;
+      if (writtenSheetId) {
+        sourceSheetIdRef.current = writtenSheetId;
+        setSourceSheetId(writtenSheetId);
+      }
+      if (!forceNewSheet) {
+        await checkSheetMetadata(true);
+      }
+    } catch (e: any) {
+      setErrorMessage(e.message || "Failed to import Look / Dashboard tile.");
+    } finally {
+      setIsExecuting(false);
+      activeTaskRef.current = null;
+    }
+  };
+
   return (
     <div className={styles.appRoot}>
       <Header
@@ -870,6 +1104,13 @@ export const App: React.FC = () => {
         onDisconnect={handleDisconnect}
         onRefreshAll={handleRefreshAll}
         refreshingAll={refreshingAll}
+        activeMode={navMode}
+        onModeChange={(mode) => {
+          setNavMode(mode);
+          if (mode !== "explore" && activeView === "refresh") {
+            setActiveView("builder");
+          }
+        }}
       />
 
       {errorMessage && (
@@ -890,6 +1131,30 @@ export const App: React.FC = () => {
 
       {!auth ? (
         <AuthView onSuccess={handleAuthSuccess} />
+      ) : navMode === "looks" ? (
+        <div className={styles.scrollContent}>
+          <LooksBrowser
+            baseUrl={auth.baseUrl}
+            token={auth.accessToken}
+            isExecuting={isExecuting}
+            onImportPayload={(p, title) => handleImportExternalPayload(p, title)}
+            onOpenInExplore={handleOpenPayloadInExplore}
+            onError={setErrorMessage}
+          />
+        </div>
+      ) : navMode === "dashboards" ? (
+        <div className={styles.scrollContent}>
+          <DashboardsBrowser
+            baseUrl={auth.baseUrl}
+            token={auth.accessToken}
+            isExecuting={isExecuting}
+            onImportPayload={(p, title, forceNew) =>
+              handleImportExternalPayload(p, title, forceNew)
+            }
+            onOpenInExplore={handleOpenPayloadInExplore}
+            onError={setErrorMessage}
+          />
+        </div>
       ) : activeView === "refresh" && sheetConfig ? (
         <RefreshView
           config={sheetConfig}

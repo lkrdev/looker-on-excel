@@ -1,3 +1,5 @@
+import { PivotDescriptor } from "./queryTaskRunner";
+
 export interface ColumnDefinition {
   fieldKey: string;
   label: string;
@@ -25,6 +27,7 @@ export interface WriteOptions {
   sheetName?: string;
   targetSheetId?: string;
   pivots?: string[];
+  pivotsMeta?: PivotDescriptor[] | null;
   prevRowCount?: number;
   prevColCount?: number;
   includeTotals?: boolean;
@@ -125,6 +128,47 @@ function isNestedPivotObject(val: any): boolean {
 }
 
 /**
+ * Resolves clean, human-readable pivot dimension values from a Looker `json_detail` pivot key
+ * (e.g. `"1 - Processing|FIELD|0|FIELD|Processing"` -> `["1 - Processing", "Processing"]`).
+ * Uses `pivotsMeta` (`labels` / `data`) when available, and falls back to stripping Looker's
+ * internal `|FIELD|` delimiters and injected `case:` / `order_by_field` sort indices.
+ */
+export function resolveCleanPivotValues(
+  rawPivotKey: string,
+  pivots?: string[],
+  pivotsMeta?: PivotDescriptor[] | null
+): string[] {
+  if (pivotsMeta && pivotsMeta.length > 0) {
+    const pm = pivotsMeta.find((p) => p.key === rawPivotKey);
+    if (pm && (pm.labels || pm.data) && pivots && pivots.length > 0) {
+      return pivots.map((pf) => {
+        const v = pm.labels?.[pf] ?? pm.data?.[pf];
+        return v === null || v === undefined || v === "null" ? "None" : String(v);
+      });
+    }
+  }
+
+  if (rawPivotKey.includes("|FIELD|")) {
+    const parts = rawPivotKey
+      .split("|FIELD|")
+      .map((s) => (s === "null" ? "None" : s.trim()));
+    const expectedCount = pivots && pivots.length > 0 ? pivots.length : parts.length;
+    if (parts.length > expectedCount) {
+      // Strip Looker's internal numeric `__sort_` tokens injected after `case:` dimensions
+      const filtered = parts.filter(
+        (token, idx) => !(idx > 0 && idx < parts.length - 1 && /^\d+$/.test(token))
+      );
+      if (filtered.length >= expectedCount) {
+        return filtered.slice(0, expectedCount);
+      }
+    }
+    return parts;
+  }
+
+  return [rawPivotKey === "null" ? "None" : rawPivotKey];
+}
+
+/**
  * Detects nested pivot structures in Looker JSON / json_detail query results and expands them
  * into tabular Crosstab columns (including Looker-computed Row Totals when present)
  * with appropriate labels and number formatting.
@@ -133,7 +177,8 @@ export function expandPivotedColumns(
   columns: ColumnDefinition[],
   dataRows: Record<string, any>[],
   pivots?: string[],
-  includeRowTotals?: boolean
+  includeRowTotals?: boolean,
+  pivotsMeta?: PivotDescriptor[] | null
 ): {
   expandedColumns: ColumnDefinition[];
   getValue: (row: Record<string, any>, col: ColumnDefinition) => any;
@@ -193,6 +238,15 @@ export function expandPivotedColumns(
       const seenPivotVals = new Set<string>();
       let hasRowTotalInRows = Boolean(includeRowTotals);
 
+      // Seed pivot column order from Looker's `pivotsMeta` when available
+      if (pivotsMeta && pivotsMeta.length > 0) {
+        pivotsMeta.forEach((pm) => {
+          if (!pm.is_total && pm.key !== "$$$_row_total_$$$") {
+            seenPivotVals.add(pm.key);
+          }
+        });
+      }
+
       dataRows.forEach((row) => {
         const measureObj = row[col.fieldKey];
         if (measureObj && typeof measureObj === "object") {
@@ -212,7 +266,8 @@ export function expandPivotedColumns(
 
       seenPivotVals.forEach((pVal) => {
         const key = `__pivot__:${col.fieldKey}:::${pivotField}:::${pVal}`;
-        const displayPivotVal = pVal === "null" ? "None" : pVal;
+        const cleanVals = resolveCleanPivotValues(pVal, pivots, pivotsMeta);
+        const displayPivotVal = cleanVals.join(" · ");
         expandedColumns.push({
           fieldKey: key,
           label: `${col.label} (${displayPivotVal})`,
@@ -428,7 +483,8 @@ export async function writeLookerDataToWorksheet(
     columns,
     effectiveRows,
     options.pivots,
-    options.includeRowTotals
+    options.includeRowTotals,
+    options.pivotsMeta
   );
   const colCount = Math.max(1, expandedColumns.length);
   const totalRows = effectiveRows.length;
