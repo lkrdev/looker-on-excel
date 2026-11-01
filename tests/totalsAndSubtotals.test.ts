@@ -1,6 +1,7 @@
 import {
   resolveResultFormatStrategy,
   normalizeQueryResult,
+  extractLookerQueryError,
   QueryPayload,
 } from "../src/taskpane/services/queryTaskRunner";
 import {
@@ -294,6 +295,44 @@ export function runTotalsAndSubtotalsTests() {
     nonPivotExpanded.getValue(nonPivotMatrix.rows[2], nonPivotExpanded.expandedColumns[2]),
     3010500,
     "Row 2 Grand Total Sum Distinct Age scalar value (3010500)"
+  );
+
+  // 6. Looker Detailed Query Error Extraction (`json_detail` & `json`)
+  assertEqual(
+    extractLookerQueryError({
+      errors: [
+        {
+          message: "Subtotal should have at least one measure",
+          message_details: null,
+          type: "invalid_query",
+        },
+      ],
+    }),
+    "Subtotal should have at least one measure",
+    "Extracts errors[].message from json_detail error payload"
+  );
+
+  assertEqual(
+    extractLookerQueryError({
+      errors: [
+        {
+          message: "The Google BigQuery Standard SQL database encountered an error",
+          message_details: "Syntax error: Unexpected keyword WHERE at [4:1]",
+        },
+      ],
+    }),
+    "The Google BigQuery Standard SQL database encountered an error (Syntax error: Unexpected keyword WHERE at [4:1])",
+    "Combines errors[].message and message_details when both are present"
+  );
+
+  assertEqual(
+    extractLookerQueryError([
+      {
+        looker_error: "Error: Invalid number filter syntax: \"not_a_number\"",
+      },
+    ]),
+    "Error: Invalid number filter syntax: \"not_a_number\"",
+    "Extracts looker_error from json array error payload"
   );
 
   console.log("=== All Totals, Subtotals & Conditional json_detail Tests Passed! ===");

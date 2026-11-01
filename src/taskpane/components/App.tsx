@@ -41,10 +41,16 @@ import { runQueryTask, QueryTaskController, QueryPayload } from "../services/que
 import {
   writeLookerDataToWorksheet,
   expandPivotedColumns,
+  resolveEffectiveColumnsForWrite,
+  parseCellAddress,
   formatCellAddress,
+  toggleWorksheetTreeNode,
+  applyWorksheetTreeDisplayLevel,
   ColumnDefinition,
   WriteOptions,
+  RowGroupDisplayLevel,
 } from "../services/excelWriter";
+import { buildEffectiveSortsForSubtotals } from "../services/hierarchyResolver";
 import {
   getActiveSheetInfo,
   getActiveCellAddress,
@@ -127,6 +133,7 @@ export const App: React.FC = () => {
   const preferredTableIdRef = useRef<string | null>(null);
   const skipDefaultPromptsRef = useRef<boolean>(false);
   const pendingFieldOrderRef = useRef<boolean>(false);
+  const togglingTreeNodeRef = useRef<boolean>(false);
 
   // Validate / refresh token on taskpane mount / relaunch of Excel
   useEffect(() => {
@@ -148,6 +155,7 @@ export const App: React.FC = () => {
       sourceSheetId: resolvedSourceId,
       config,
       allSheetTables: resolvedTables,
+      selectedCellAddress,
       isPivotSheet,
     } = await getActiveSheetInfo(sourceSheetIdRef.current, preferredTableIdRef.current);
 
@@ -159,10 +167,62 @@ export const App: React.FC = () => {
       preferredTableIdRef.current = null;
     }
 
+    // In-sheet interactive expand/collapse when user clicks a `▸` / `▾` parent cell in the Group column
+    if (
+      !forceViewSync &&
+      !activeChanged &&
+      !togglingTreeNodeRef.current &&
+      selectedCellAddress &&
+      config?.options?.enableRowGroups &&
+      config?.options?.treeNodes &&
+      config.options.treeNodes.length > 0
+    ) {
+      const { startRow: selRow, startCol: selCol } = parseCellAddress(selectedCellAddress);
+      const { startRow: tblRow, startCol: tblCol } = parseCellAddress(
+        config.anchorCell || config.options.anchorCell || "A1"
+      );
+      if (selCol === tblCol && selRow >= tblRow + 1) {
+        try {
+          togglingTreeNodeRef.current = true;
+          const updatedNodes = await toggleWorksheetTreeNode(
+            resolvedSourceId || activeSheetId || undefined,
+            config.options,
+            config.rowCount,
+            selRow,
+            selCol
+          );
+          if (updatedNodes) {
+            const updatedCfg: StoredSheetConfig = {
+              ...config,
+              options: {
+                ...config.options,
+                treeNodes: updatedNodes,
+              },
+            };
+            const nextTables = await saveSheetMetadata(
+              updatedCfg,
+              resolvedSourceId || activeSheetId || undefined
+            );
+            setAllSheetTables(nextTables);
+            setSheetConfig(updatedCfg);
+            return;
+          }
+        } catch (err) {
+          console.warn("Tree node toggle skipped:", err);
+        } finally {
+          togglingTreeNodeRef.current = false;
+        }
+      }
+    }
+
     setAllSheetTables(resolvedTables || []);
     if (config) {
       setSheetConfig(config);
       preferredTableIdRef.current = config.tableId || null;
+      if (config.queryPayload?.model && config.queryPayload?.view) {
+        setSelectedModel(config.queryPayload.model);
+        setSelectedExplore(config.queryPayload.view);
+      }
     }
 
     if (forceViewSync || activeChanged || lastActiveSheetIdRef.current === null) {
@@ -545,17 +605,40 @@ export const App: React.FC = () => {
         return def?.category === "dimension" && !pivots.includes(fName);
       });
 
-      const subtotalsList =
-        tableOptions.includeSubtotals && nonPivotDims.length >= 2
-          ? nonPivotDims.slice(0, -1)
-          : null;
+      const orderedNonPivotDims =
+        tableOptions.enableRowGroups &&
+        tableOptions.rowGroupFields &&
+        tableOptions.rowGroupFields.length >= 2
+          ? [
+              ...tableOptions.rowGroupFields.filter((f) => nonPivotDims.includes(f)),
+              ...nonPivotDims.filter((f) => !tableOptions.rowGroupFields!.includes(f)),
+            ]
+          : nonPivotDims;
+
+      const hasSelectedMeasures = selectedFields.some((fName) => {
+        const def = allAvailableFields.find((f) => f.name === fName);
+        return def?.category === "measure";
+      });
+
+      const wantSubtotals =
+        hasSelectedMeasures &&
+        (tableOptions.includeSubtotals ||
+          (tableOptions.enableRowGroups && tableOptions.showGroupSubtotals !== false)) &&
+        orderedNonPivotDims.length >= 2;
+
+      const subtotalsList = wantSubtotals ? orderedNonPivotDims.slice(0, -1) : null;
+      const effectiveSorts = subtotalsList
+        ? buildEffectiveSortsForSubtotals(sorts, subtotalsList)
+        : sorts.length > 0
+        ? sorts
+        : [];
 
       const queryPayload: QueryPayload = {
         model: selectedModel,
         view: selectedExplore,
         fields: selectedFields,
         filters: Object.keys(compiledFilters).length > 0 ? compiledFilters : null,
-        sorts: sorts.length > 0 ? sorts : [],
+        sorts: effectiveSorts,
         limit: rowLimit,
         pivots: pivots.length > 0 ? pivots : null,
         total: tableOptions.includeTotals ? true : undefined,
@@ -591,8 +674,13 @@ export const App: React.FC = () => {
 
       // 4. Stream to Excel
       setStatusText(`Streaming ${dataRows.length.toLocaleString()} rows into worksheet...`);
+      const baseColsForExpand = resolveEffectiveColumnsForWrite(columns, {
+        ...tableOptions,
+        pivots: pivots.length > 0 ? pivots : undefined,
+        rowGroupFields: orderedNonPivotDims,
+      });
       const expandedColCount = expandPivotedColumns(
-        columns,
+        baseColsForExpand,
         dataRows,
         pivots.length > 0 ? pivots : undefined,
         Boolean(tableOptions.includeRowTotals && pivots.length > 0),
@@ -614,6 +702,7 @@ export const App: React.FC = () => {
 
       const writeOptions: WriteOptions = {
         ...tableOptions,
+        rowGroupFields: orderedNonPivotDims,
         anchorCell: effectiveAnchor,
         tableId: effectiveTableId,
         siblingTableRanges: siblingRanges,
@@ -640,9 +729,11 @@ export const App: React.FC = () => {
       );
 
       const totalWrittenDataRows =
-        dataRows.length +
-        (bundle.subtotalsData ? Object.values(bundle.subtotalsData).flat().length : 0) +
-        (bundle.totalsData ? 1 : 0);
+        writeOptions.rowLevels && writeOptions.rowLevels.length > 0
+          ? writeOptions.rowLevels.length
+          : dataRows.length +
+            (bundle.subtotalsData ? Object.values(bundle.subtotalsData).flat().length : 0) +
+            (bundle.totalsData ? 1 : 0);
 
       // 5. Persist metadata for one-click refresh on the actual Looker data worksheet
       const config: StoredSheetConfig = {
@@ -682,8 +773,11 @@ export const App: React.FC = () => {
     }
   };
 
-  // Re-run Refresh on active (or source) Looker table
-  const handleRefreshActive = async () => {
+  // Re-run Refresh on active (or source) Looker table (optionally with an expanded/collapsed hierarchy payload)
+  const handleRefreshActive = async (
+    overridePayload?: QueryPayload,
+    overrideOptions?: Partial<WriteOptions>
+  ) => {
     if (!auth || !sheetConfig) return;
     clearCustomFunctionCache();
 
@@ -698,10 +792,65 @@ export const App: React.FC = () => {
         setAuth(validAuth);
       }
 
+      const basePayload = overridePayload || sheetConfig.queryPayload;
+      const mergedOptions: WriteOptions = {
+        ...sheetConfig.options,
+        ...(overrideOptions || {}),
+      };
+      const allAvailableFields = exploreDetail
+        ? [...exploreDetail.fields.dimensions, ...exploreDetail.fields.measures]
+        : [];
+
+      const activeColumns: ColumnDefinition[] = overridePayload
+        ? (basePayload.fields || []).map((fieldKey) => {
+            const existingCol = sheetConfig.columns.find((c) => c.fieldKey === fieldKey);
+            if (existingCol) return existingCol;
+            const def = allAvailableFields.find((f) => f.name === fieldKey);
+            return {
+              fieldKey,
+              label: def?.label || fieldKey,
+              type: def?.type,
+              excelFormat: def ? resolveExcelNumberFormat(def) : undefined,
+              category: def?.category,
+            };
+          })
+        : sheetConfig.columns;
+
+      const activePivots = basePayload.pivots || undefined;
+      const nonPivotDims = (basePayload.fields || []).filter((fName) => {
+        const col = activeColumns.find((c) => c.fieldKey === fName);
+        const def = allAvailableFields.find((f) => f.name === fName);
+        const isDim = (col?.category || def?.category || "dimension") === "dimension";
+        return isDim && !(activePivots || []).includes(fName);
+      });
+
+      const hasSelectedMeasures = (basePayload.fields || []).some((fName) => {
+        const col = activeColumns.find((c) => c.fieldKey === fName);
+        const def = allAvailableFields.find((f) => f.name === fName);
+        return (col?.category || def?.category) === "measure";
+      });
+
+      const wantSubtotals =
+        hasSelectedMeasures &&
+        (mergedOptions.includeSubtotals ||
+          (mergedOptions.enableRowGroups && mergedOptions.showGroupSubtotals !== false)) &&
+        nonPivotDims.length >= 2;
+
+      const subtotalsList = wantSubtotals ? nonPivotDims.slice(0, -1) : null;
+      const effectiveSorts = subtotalsList
+        ? buildEffectiveSortsForSubtotals(basePayload.sorts || [], subtotalsList)
+        : basePayload.sorts || [];
+
+      const effectivePayload: QueryPayload = {
+        ...basePayload,
+        sorts: effectiveSorts,
+        subtotals: subtotalsList,
+      };
+
       const controller = await runQueryTask(
         validAuth.baseUrl,
         validAuth.accessToken,
-        sheetConfig.queryPayload
+        effectivePayload
       );
       activeTaskRef.current = controller;
 
@@ -710,22 +859,26 @@ export const App: React.FC = () => {
       });
       const dataRows = bundle.rows;
 
-      const activePivots = sheetConfig.queryPayload.pivots || undefined;
+      const baseColsForExpand = resolveEffectiveColumnsForWrite(activeColumns, {
+        ...mergedOptions,
+        pivots: activePivots,
+        rowGroupFields: nonPivotDims,
+      });
       const expandedColCount = expandPivotedColumns(
-        sheetConfig.columns,
+        baseColsForExpand,
         dataRows,
         activePivots,
-        Boolean(sheetConfig.queryPayload.row_total),
+        Boolean(effectivePayload.row_total),
         bundle.pivotsMeta
       ).expandedColumns.length;
 
       const effectiveAnchor = (
         sheetConfig.anchorCell ||
-        sheetConfig.options?.anchorCell ||
+        mergedOptions.anchorCell ||
         "A1"
       ).toUpperCase();
       const effectiveTableId =
-        sheetConfig.tableId || sheetConfig.options?.tableId || `Looker_${effectiveAnchor}`;
+        sheetConfig.tableId || mergedOptions.tableId || `Looker_${effectiveAnchor}`;
       const siblingRanges = getSiblingTableBoundingBoxes(
         allSheetTables,
         effectiveTableId,
@@ -733,39 +886,46 @@ export const App: React.FC = () => {
       );
 
       setStatusText(`Writing ${dataRows.length.toLocaleString()} rows...`);
+      const writeOpts: WriteOptions = {
+        ...mergedOptions,
+        rowGroupFields: nonPivotDims,
+        anchorCell: effectiveAnchor,
+        tableId: effectiveTableId,
+        siblingTableRanges: siblingRanges,
+        destination: "active",
+        targetSheetId: sourceSheetId || undefined,
+        pivots: activePivots,
+        pivotsMeta: bundle.pivotsMeta,
+        prevRowCount: sheetConfig.rowCount,
+        prevColCount: sheetConfig.options?.prevColCount ?? sheetConfig.columns.length,
+        totalsData: bundle.totalsData,
+        subtotalsData: bundle.subtotalsData,
+      };
       const writtenSheetId = await writeLookerDataToWorksheet(
-        sheetConfig.columns,
+        activeColumns,
         dataRows,
-        {
-          ...sheetConfig.options,
-          anchorCell: effectiveAnchor,
-          tableId: effectiveTableId,
-          siblingTableRanges: siblingRanges,
-          destination: "active",
-          targetSheetId: sourceSheetId || undefined,
-          pivots: activePivots,
-          pivotsMeta: bundle.pivotsMeta,
-          prevRowCount: sheetConfig.rowCount,
-          prevColCount: sheetConfig.options?.prevColCount ?? sheetConfig.columns.length,
-          totalsData: bundle.totalsData,
-          subtotalsData: bundle.subtotalsData,
-        },
+        writeOpts,
         (pct) => setProgressPercent(pct)
       );
 
       const totalWrittenDataRows =
-        dataRows.length +
-        (bundle.subtotalsData ? Object.values(bundle.subtotalsData).flat().length : 0) +
-        (bundle.totalsData ? 1 : 0);
+        writeOpts.rowLevels && writeOpts.rowLevels.length > 0
+          ? writeOpts.rowLevels.length
+          : dataRows.length +
+            (bundle.subtotalsData ? Object.values(bundle.subtotalsData).flat().length : 0) +
+            (bundle.totalsData ? 1 : 0);
 
       const updatedConfig: StoredSheetConfig = {
         ...sheetConfig,
         tableId: effectiveTableId,
         anchorCell: effectiveAnchor,
+        queryPayload: effectivePayload,
+        columns: activeColumns,
         options: {
-          ...sheetConfig.options,
-          anchorCell: effectiveAnchor,
-          tableId: effectiveTableId,
+          ...writeOpts,
+          totalsData: undefined,
+          subtotalsData: undefined,
+          siblingTableRanges: undefined,
           destination: "active",
           targetSheetId: undefined,
           prevRowCount: totalWrittenDataRows,
@@ -1159,12 +1319,40 @@ export const App: React.FC = () => {
         <RefreshView
           config={sheetConfig}
           allSheetTables={allSheetTables}
+          exploreDimensions={exploreDetail?.fields.dimensions || []}
           onSelectTable={(tbl) => {
             preferredTableIdRef.current = tbl.tableId || null;
             setSheetConfig(tbl);
           }}
           onAddTableToSheet={handleAddTableToSheet}
-          onRefresh={handleRefreshActive}
+          onApplyDrillPayload={(updatedPayload, updatedOpts) =>
+            handleRefreshActive(updatedPayload, updatedOpts)
+          }
+          onChangeDisplayLevel={async (nextLevel: RowGroupDisplayLevel) => {
+            const updatedNodes = await applyWorksheetTreeDisplayLevel(
+              sourceSheetId || undefined,
+              sheetConfig.options,
+              sheetConfig.rowCount,
+              nextLevel
+            );
+            if (updatedNodes) {
+              const updatedCfg: StoredSheetConfig = {
+                ...sheetConfig,
+                options: {
+                  ...sheetConfig.options,
+                  defaultDisplayLevel: nextLevel,
+                  treeNodes: updatedNodes,
+                },
+              };
+              const nextTables = await saveSheetMetadata(
+                updatedCfg,
+                sourceSheetId || undefined
+              );
+              setAllSheetTables(nextTables);
+              setSheetConfig(updatedCfg);
+            }
+          }}
+          onRefresh={() => handleRefreshActive()}
           onCancel={handleCancelQuery}
           onEdit={() => handleEditQuery(sheetConfig)}
           onNewQuery={handleStartNewQuery}
@@ -1231,6 +1419,8 @@ export const App: React.FC = () => {
                   pivots={pivots}
                   onTogglePivot={handleTogglePivot}
                   onReorderFields={setSelectedFields}
+                  options={tableOptions}
+                  onOptionsChange={(upd) => setTableOptions((prev) => ({ ...prev, ...upd }))}
                 />
 
                 <FilterBuilder
