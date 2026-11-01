@@ -31,6 +31,7 @@ import {
   getModels,
   getExplore,
   getCurrentUser,
+  orderFieldsDimensionsFirst,
   ModelSummary,
   ExploreDetail,
   UserSummary,
@@ -125,6 +126,7 @@ export const App: React.FC = () => {
   const sourceSheetIdRef = useRef<string | null>(null);
   const preferredTableIdRef = useRef<string | null>(null);
   const skipDefaultPromptsRef = useRef<boolean>(false);
+  const pendingFieldOrderRef = useRef<boolean>(false);
 
   // Validate / refresh token on taskpane mount / relaunch of Excel
   useEffect(() => {
@@ -258,6 +260,14 @@ export const App: React.FC = () => {
       .then((data) => {
         setExploreDetail(data);
 
+        if (pendingFieldOrderRef.current) {
+          pendingFieldOrderRef.current = false;
+          const allDefs = [...data.fields.dimensions, ...data.fields.measures];
+          setSelectedFields((prev) =>
+            orderFieldsDimensionsFirst(prev, allDefs, pivots)
+          );
+        }
+
         // Pre-fill defaults for any required always_filter unless hydrating from handleEditQuery
         if (skipDefaultPromptsRef.current) {
           skipDefaultPromptsRef.current = false;
@@ -302,6 +312,17 @@ export const App: React.FC = () => {
         setSorts((s) => s.filter((x) => x !== fieldName && !x.startsWith(`${fieldName} `)));
         setPivots((p) => p.filter((x) => x !== fieldName));
         return prev.filter((f) => f !== fieldName);
+      }
+      // Keep Dimensions before Measures by default when adding a new Dimension
+      const isDim = exploreDetail?.fields.dimensions.some((d) => d.name === fieldName);
+      if (isDim && exploreDetail) {
+        const measureSet = new Set(exploreDetail.fields.measures.map((m) => m.name));
+        const firstMeasureIdx = prev.findIndex((f) => measureSet.has(f));
+        if (firstMeasureIdx !== -1) {
+          const next = [...prev];
+          next.splice(firstMeasureIdx, 0, fieldName);
+          return next;
+        }
       }
       return [...prev, fieldName];
     });
@@ -917,9 +938,25 @@ export const App: React.FC = () => {
   // Load a Saved Look or Dashboard Tile query into the Explore Builder
   const handleOpenPayloadInExplore = (payload: QueryPayload) => {
     skipDefaultPromptsRef.current = true;
+    const isSameExplore =
+      exploreDetail &&
+      payload.model === selectedModel &&
+      payload.view === selectedExplore;
+    const initialOrderedFields =
+      isSameExplore && exploreDetail
+        ? orderFieldsDimensionsFirst(
+            payload.fields || [],
+            [...exploreDetail.fields.dimensions, ...exploreDetail.fields.measures],
+            payload.pivots
+          )
+        : payload.fields || [];
+    if (!isSameExplore) {
+      pendingFieldOrderRef.current = true;
+    }
+
     setSelectedModel(payload.model);
     setSelectedExplore(payload.view);
-    setSelectedFields(payload.fields || []);
+    setSelectedFields(initialOrderedFields);
     setSorts(payload.sorts || []);
     setPivots(payload.pivots || []);
     setRowLimit(payload.limit || "500");
@@ -982,7 +1019,18 @@ export const App: React.FC = () => {
         ? [...expMeta.fields.dimensions, ...expMeta.fields.measures]
         : [];
 
-      const columns: ColumnDefinition[] = (payload.fields || []).map((fieldKey) => {
+      // Normalize field order so Dimensions always precede Measures (Looker API returns raw click order)
+      const orderedFieldKeys = orderFieldsDimensionsFirst(
+        payload.fields || [],
+        allAvailableFields,
+        payload.pivots
+      );
+      const orderedPayload: QueryPayload = {
+        ...payload,
+        fields: orderedFieldKeys,
+      };
+
+      const columns: ColumnDefinition[] = orderedFieldKeys.map((fieldKey) => {
         const def = allAvailableFields.find((f) => f.name === fieldKey);
         return {
           fieldKey,
@@ -996,7 +1044,7 @@ export const App: React.FC = () => {
       const controller = await runQueryTask(
         validAuth.baseUrl,
         validAuth.accessToken,
-        payload
+        orderedPayload
       );
       activeTaskRef.current = controller;
 
@@ -1008,8 +1056,8 @@ export const App: React.FC = () => {
       const expandedColCount = expandPivotedColumns(
         columns,
         dataRows,
-        payload.pivots || undefined,
-        Boolean(payload.row_total),
+        orderedPayload.pivots || undefined,
+        Boolean(orderedPayload.row_total),
         bundle.pivotsMeta,
         tableOptions.pivotGroupMode || "measure_first"
       ).expandedColumns.length;
@@ -1033,11 +1081,11 @@ export const App: React.FC = () => {
         siblingTableRanges: siblingRanges,
         destination: effectiveDest,
         sheetName: sheetTitle,
-        pivots: payload.pivots || undefined,
+        pivots: orderedPayload.pivots || undefined,
         pivotsMeta: bundle.pivotsMeta,
-        includeTotals: Boolean(payload.total),
-        includeRowTotals: Boolean(payload.row_total),
-        includeSubtotals: Boolean(payload.subtotals && payload.subtotals.length > 0),
+        includeTotals: Boolean(orderedPayload.total),
+        includeRowTotals: Boolean(orderedPayload.row_total),
+        includeSubtotals: Boolean(orderedPayload.subtotals && orderedPayload.subtotals.length > 0),
         totalsData: bundle.totalsData,
         subtotalsData: bundle.subtotalsData,
       };
@@ -1057,7 +1105,7 @@ export const App: React.FC = () => {
       const config: StoredSheetConfig = {
         tableId: effectiveTableId,
         anchorCell: effectiveAnchor,
-        queryPayload: payload,
+        queryPayload: orderedPayload,
         columns,
         options: {
           ...writeOptions,
