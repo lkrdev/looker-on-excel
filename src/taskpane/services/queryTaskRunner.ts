@@ -67,6 +67,42 @@ export function resolveResultFormatStrategy(
   return "json_detail";
 }
 
+function isJsonDetailLeafCell(obj: any): boolean {
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+    return false;
+  }
+  if ("value" in obj && (obj.value === null || obj.value === undefined || typeof obj.value !== "object")) {
+    return true;
+  }
+  if (
+    "has_custom_html" in obj ||
+    "rendered" in obj ||
+    "html" in obj ||
+    "filterable_value" in obj ||
+    "links" in obj
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function unwrapLeafValue(cell: any): any {
+  if (cell === null || cell === undefined) {
+    return null;
+  }
+  if (typeof cell !== "object" || Array.isArray(cell)) {
+    return cell;
+  }
+  if ("value" in cell) {
+    const v = cell.value;
+    return v === undefined || (typeof v === "object" && v !== null) ? null : v;
+  }
+  if ("rendered" in cell && typeof cell.rendered !== "object") {
+    return cell.rendered;
+  }
+  return null;
+}
+
 /**
  * Unwraps a Looker `json_detail` cell or pivoted cell map into the flat / nested value structure
  * expected by `excelWriter.ts`.
@@ -79,33 +115,42 @@ export function unwrapJsonDetailCell(
   if (cellOrMap === null || cellOrMap === undefined) {
     return null;
   }
-  if (typeof cellOrMap !== "object" || Array.isArray(cellOrMap)) {
+  if (typeof cellOrMap !== "object") {
     return cellOrMap;
   }
+  if (Array.isArray(cellOrMap)) {
+    return JSON.stringify(cellOrMap);
+  }
 
-  // Direct non-pivoted cell object: { value: X, rendered?: string, ... }
-  if ("value" in cellOrMap && Object.keys(cellOrMap).every((k) => k === "value" || k === "rendered" || k === "html" || k === "links" || k === "filterable_value")) {
-    return cellOrMap.value;
+  const keys = Object.keys(cellOrMap);
+  if (keys.length === 0) {
+    return null;
+  }
+
+  // Direct non-pivoted cell object: { value: X, rendered?: string, has_custom_html?: boolean, html?: string, links?: [...] }
+  if (isJsonDetailLeafCell(cellOrMap)) {
+    return unwrapLeafValue(cellOrMap);
   }
 
   const primaryPivotField = pivots && pivots.length > 0 ? pivots[0] : null;
 
+  // If the query has no pivoted dimensions, never wrap cell metadata into a fake pivot map
+  if (!primaryPivotField) {
+    return unwrapLeafValue(cellOrMap);
+  }
+
   // Check if already nested by pivot dimension name: { "orders.created_year": { "2024": { value: 100 } } }
-  const keys = Object.keys(cellOrMap);
   if (
-    primaryPivotField &&
     keys.includes(primaryPivotField) &&
     cellOrMap[primaryPivotField] &&
     typeof cellOrMap[primaryPivotField] === "object" &&
-    !("value" in cellOrMap[primaryPivotField])
+    !isJsonDetailLeafCell(cellOrMap[primaryPivotField])
   ) {
     const innerObj = cellOrMap[primaryPivotField];
     const normalizedInner: Record<string, any> = {};
     for (const [pKey, pCell] of Object.entries(innerObj)) {
       normalizedInner[pKey] =
-        pCell && typeof pCell === "object" && "value" in (pCell as any)
-          ? (pCell as any).value
-          : pCell;
+        pCell && typeof pCell === "object" ? unwrapLeafValue(pCell) : pCell;
     }
     const result: Record<string, any> = {
       [primaryPivotField]: normalizedInner,
@@ -113,7 +158,7 @@ export function unwrapJsonDetailCell(
     if ("$$$_row_total_$$$" in cellOrMap) {
       const rt = cellOrMap["$$$_row_total_$$$"];
       result["$$$_row_total_$$$"] =
-        rt && typeof rt === "object" && "value" in rt ? rt.value : rt;
+        rt && typeof rt === "object" ? unwrapLeafValue(rt) : rt;
     }
     return result;
   }
@@ -135,7 +180,7 @@ export function unwrapJsonDetailCell(
   for (const k of orderedKeys) {
     const entry = cellOrMap[k];
     const unwrapped =
-      entry && typeof entry === "object" && "value" in entry ? entry.value : entry;
+      entry && typeof entry === "object" ? unwrapLeafValue(entry) : entry;
     if (k === "$$$_row_total_$$$") {
       hasRowTotalKey = true;
       rowTotalVal = unwrapped;
@@ -144,9 +189,8 @@ export function unwrapJsonDetailCell(
     }
   }
 
-  const effectivePivotField = primaryPivotField || "__pivot_key__";
   const wrapped: Record<string, any> = {
-    [effectivePivotField]: pivotValuesMap,
+    [primaryPivotField]: pivotValuesMap,
   };
   if (hasRowTotalKey) {
     wrapped["$$$_row_total_$$$"] = rowTotalVal;

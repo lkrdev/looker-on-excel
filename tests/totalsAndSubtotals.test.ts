@@ -207,6 +207,95 @@ export function runTotalsAndSubtotalsTests() {
     "Grand Total Row Total uses Looker non-additive SQL value (350)"
   );
 
+  // 5. Non-pivoted query with Column Grand Totals (`has_custom_html`, `html`, `links` in totals_data)
+  const rawNonPivotedTotals = {
+    data: [
+      {
+        "basic_products.department": { value: "Men" },
+        "basic_users.unique_users": {
+          value: 40000,
+          links: [{ label: "Show All 40,000", url: "/explore/basic_ecomm" }],
+        },
+        "basic_users.sum_distinct_age": {
+          value: 1520000,
+          links: [{ label: "Show All", url: "/explore/basic_ecomm" }],
+        },
+      },
+      {
+        "basic_products.department": { value: "Women" },
+        "basic_users.unique_users": {
+          value: 42000,
+          links: [{ label: "Show All 42,000", url: "/explore/basic_ecomm" }],
+        },
+        "basic_users.sum_distinct_age": {
+          value: 1610000,
+          links: [{ label: "Show All", url: "/explore/basic_ecomm" }],
+        },
+      },
+    ],
+    totals_data: {
+      "basic_products.department": {},
+      "basic_users.unique_users": {
+        value: 79748,
+        has_custom_html: false,
+        html: "79,748",
+        links: [{ label: "Show All 79,748", url: "/explore/basic_ecomm" }],
+      },
+      "basic_users.sum_distinct_age": {
+        value: 3010500,
+        has_custom_html: false,
+        html: "3,010,500",
+        links: [{ label: "Show All", url: "/explore/basic_ecomm" }],
+      },
+    },
+  };
+
+  const nonPivotedBundle = normalizeQueryResult(rawNonPivotedTotals, null, "json_detail");
+  const nonPivotCols: ColumnDefinition[] = [
+    { fieldKey: "basic_products.department", label: "Basic Products Department", category: "dimension" },
+    { fieldKey: "basic_users.unique_users", label: "Basic Users Unique Users", category: "measure" },
+    { fieldKey: "basic_users.sum_distinct_age", label: "Basic Users Sum Distinct Age", category: "measure" },
+  ];
+
+  const nonPivotMatrix = buildWorksheetRowMatrix(
+    nonPivotCols,
+    nonPivotedBundle.rows,
+    nonPivotedBundle.subtotalsData,
+    nonPivotedBundle.totalsData,
+    undefined
+  );
+  const nonPivotExpanded = expandPivotedColumns(nonPivotCols, nonPivotMatrix.rows, undefined, false);
+
+  assertEqual(
+    nonPivotExpanded.expandedColumns.map((c) => c.label),
+    [
+      "Basic Products Department",
+      "Basic Users Unique Users",
+      "Basic Users Sum Distinct Age",
+    ],
+    "Non-pivoted totals_data with has_custom_html/html/links never expands into fake (value)/(has_custom_html)/(html) columns"
+  );
+  assertEqual(
+    nonPivotExpanded.getValue(nonPivotMatrix.rows[0], nonPivotExpanded.expandedColumns[1]),
+    40000,
+    "Row 0 Men Unique Users scalar value preserved (40000)"
+  );
+  assertEqual(
+    nonPivotExpanded.getValue(nonPivotMatrix.rows[2], nonPivotExpanded.expandedColumns[0]),
+    "Grand Total",
+    "Row 2 Grand Total label"
+  );
+  assertEqual(
+    nonPivotExpanded.getValue(nonPivotMatrix.rows[2], nonPivotExpanded.expandedColumns[1]),
+    79748,
+    "Row 2 Grand Total Unique Users scalar value (79748)"
+  );
+  assertEqual(
+    nonPivotExpanded.getValue(nonPivotMatrix.rows[2], nonPivotExpanded.expandedColumns[2]),
+    3010500,
+    "Row 2 Grand Total Sum Distinct Age scalar value (3010500)"
+  );
+
   console.log("=== All Totals, Subtotals & Conditional json_detail Tests Passed! ===");
 }
 
