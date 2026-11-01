@@ -1715,7 +1715,7 @@ export async function writeLookerDataToWorksheet(
               }
               if (state) {
                 const hideRng = sheet.getRangeByIndexes(
-                  startRow + 1 + runStart,
+                  startRow + headerRowCount + runStart,
                   startCol,
                   runEnd - runStart + 1,
                   colCount
@@ -1858,6 +1858,7 @@ export async function writeLookerDataToWorksheet(
 async function syncTreeVisibilityToWorksheet(
   targetSheetId: string | undefined,
   anchorCell: string | undefined,
+  headerRowCount: number,
   totalRows: number,
   colCount: number,
   treeNodes: HierarchyTreeNodeMeta[],
@@ -1876,7 +1877,12 @@ async function syncTreeVisibilityToWorksheet(
 
     // 1. Update parent `▸` / `▾` cell labels in the Group column
     for (const node of treeNodes) {
-      const cell = sheet.getRangeByIndexes(startRow + 1 + node.rowOffset, startCol, 1, 1);
+      const cell = sheet.getRangeByIndexes(
+        startRow + headerRowCount + node.rowOffset,
+        startCol,
+        1,
+        1
+      );
       cell.values = [
         [
           formatTreeGroupCellLabel(
@@ -1900,7 +1906,7 @@ async function syncTreeVisibilityToWorksheet(
         runEnd++;
       }
       const rng = sheet.getRangeByIndexes(
-        startRow + 1 + runStart,
+        startRow + headerRowCount + runStart,
         startCol,
         runEnd - runStart + 1,
         Math.max(1, colCount)
@@ -1939,10 +1945,14 @@ export async function toggleWorksheetTreeNode(
     return null;
   }
   const { startRow, startCol } = parseCellAddress(options.anchorCell);
-  if (clickedSheetCol0Based !== startCol || clickedSheetRow0Based < startRow + 1) {
+  const headerRowCount =
+    options.useMultiRowCrosstabHeader && options.pivots && options.pivots.length > 0
+      ? options.pivots.length + 1
+      : 1;
+  if (clickedSheetCol0Based !== startCol || clickedSheetRow0Based < startRow + headerRowCount) {
     return null;
   }
-  const clickedOffset = clickedSheetRow0Based - (startRow + 1);
+  const clickedOffset = clickedSheetRow0Based - (startRow + headerRowCount);
   const targetIdx = options.treeNodes.findIndex((n) => n.rowOffset === clickedOffset);
   if (targetIdx === -1) {
     return null;
@@ -1956,6 +1966,7 @@ export async function toggleWorksheetTreeNode(
   await syncTreeVisibilityToWorksheet(
     targetSheetId,
     options.anchorCell,
+    headerRowCount,
     totalRows,
     colCount,
     updatedNodes,
@@ -1980,6 +1991,10 @@ export async function applyWorksheetTreeDisplayLevel(
   if (!options.enableRowGroups || !options.treeNodes || options.treeNodes.length === 0) {
     return null;
   }
+  const headerRowCount =
+    options.useMultiRowCrosstabHeader && options.pivots && options.pivots.length > 0
+      ? options.pivots.length + 1
+      : 1;
   const maxVisibleLevel = getMaxVisibleLevel(displayLevel);
   const updatedNodes = options.treeNodes.map((n) => ({
     ...n,
@@ -1990,6 +2005,7 @@ export async function applyWorksheetTreeDisplayLevel(
   await syncTreeVisibilityToWorksheet(
     targetSheetId,
     options.anchorCell,
+    headerRowCount,
     totalRows,
     colCount,
     updatedNodes,
