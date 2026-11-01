@@ -26,10 +26,6 @@ const TIMEFRAME_RANK: Array<{ match: (f: FieldDefinition) => boolean; rank: numb
   { match: (f) => f.type === "date_month" || f.name.endsWith("_month"), rank: 30 },
   { match: (f) => f.type === "date_week" || f.name.endsWith("_week"), rank: 40 },
   { match: (f) => f.type === "date_date" || f.name.endsWith("_date"), rank: 50 },
-  { match: (f) => f.type === "date_hour" || f.name.endsWith("_hour"), rank: 60 },
-  { match: (f) => f.type === "date_minute" || f.name.endsWith("_minute"), rank: 70 },
-  { match: (f) => f.type === "date_time" || f.name.endsWith("_time"), rank: 80 },
-  { match: (f) => f.type === "date_raw" || f.name.endsWith("_raw"), rank: 90 },
 ];
 
 function getTimeframeRank(f: FieldDefinition): number | null {
