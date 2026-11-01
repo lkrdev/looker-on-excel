@@ -99,6 +99,9 @@ export const App: React.FC = () => {
     autoExpandFormulas: true,
     freezeHeader: true,
     nullDisplay: "",
+    includeTotals: false,
+    includeRowTotals: false,
+    includeSubtotals: false,
   });
 
   // Execution & Progress state
@@ -462,6 +465,16 @@ export const App: React.FC = () => {
         }
       });
 
+      const nonPivotDims = selectedFields.filter((fName) => {
+        const def = allAvailableFields.find((f) => f.name === fName);
+        return def?.category === "dimension" && !pivots.includes(fName);
+      });
+
+      const subtotalsList =
+        tableOptions.includeSubtotals && nonPivotDims.length >= 2
+          ? nonPivotDims.slice(0, -1)
+          : null;
+
       const queryPayload: QueryPayload = {
         model: selectedModel,
         view: selectedExplore,
@@ -470,6 +483,10 @@ export const App: React.FC = () => {
         sorts: sorts.length > 0 ? sorts : [],
         limit: rowLimit,
         pivots: pivots.length > 0 ? pivots : null,
+        total: tableOptions.includeTotals ? true : undefined,
+        row_total:
+          tableOptions.includeRowTotals && pivots.length > 0 ? "right" : undefined,
+        subtotals: subtotalsList,
       };
 
       // 2. Prepare column metadata with number formats
@@ -480,6 +497,7 @@ export const App: React.FC = () => {
           label: def?.label || fieldKey,
           type: def?.type,
           excelFormat: def ? resolveExcelNumberFormat(def) : undefined,
+          category: def?.category,
         };
       });
 
@@ -491,16 +509,18 @@ export const App: React.FC = () => {
       );
       activeTaskRef.current = controller;
 
-      const dataRows = await controller.waitForResults((status, elapsed) => {
+      const bundle = await controller.waitForBundle((status, elapsed) => {
         setStatusText(`Running query in warehouse... (${elapsed}s)`);
       });
+      const dataRows = bundle.rows;
 
       // 4. Stream to Excel
       setStatusText(`Streaming ${dataRows.length.toLocaleString()} rows into worksheet...`);
       const expandedColCount = expandPivotedColumns(
         columns,
         dataRows,
-        pivots.length > 0 ? pivots : undefined
+        pivots.length > 0 ? pivots : undefined,
+        Boolean(tableOptions.includeRowTotals && pivots.length > 0)
       ).expandedColumns.length;
 
       const targetSheetId =
@@ -517,6 +537,8 @@ export const App: React.FC = () => {
           destination === "active"
             ? sheetConfig?.options?.prevColCount ?? sheetConfig?.columns?.length
             : undefined,
+        totalsData: bundle.totalsData,
+        subtotalsData: bundle.subtotalsData,
       };
       const writtenSheetId = await writeLookerDataToWorksheet(
         columns,
@@ -527,19 +549,26 @@ export const App: React.FC = () => {
         }
       );
 
+      const totalWrittenDataRows =
+        dataRows.length +
+        (bundle.subtotalsData ? Object.values(bundle.subtotalsData).flat().length : 0) +
+        (bundle.totalsData ? 1 : 0);
+
       // 5. Persist metadata for one-click refresh on the actual Looker data worksheet
       const config: StoredSheetConfig = {
         queryPayload,
         columns,
         options: {
           ...writeOptions,
+          totalsData: undefined,
+          subtotalsData: undefined,
           destination: "active",
           targetSheetId: undefined,
-          prevRowCount: dataRows.length,
+          prevRowCount: totalWrittenDataRows,
           prevColCount: expandedColCount,
         },
         lastRefreshed: new Date().toISOString(),
-        rowCount: dataRows.length,
+        rowCount: totalWrittenDataRows,
         modelLabel: models.find((m) => m.name === selectedModel)?.label,
         exploreLabel: exploreDetail.label,
         filters,
@@ -581,15 +610,17 @@ export const App: React.FC = () => {
       );
       activeTaskRef.current = controller;
 
-      const dataRows = await controller.waitForResults((_, elapsed) => {
+      const bundle = await controller.waitForBundle((_, elapsed) => {
         setStatusText(`Refreshing data from warehouse... (${elapsed}s)`);
       });
+      const dataRows = bundle.rows;
 
       const activePivots = sheetConfig.queryPayload.pivots || undefined;
       const expandedColCount = expandPivotedColumns(
         sheetConfig.columns,
         dataRows,
-        activePivots
+        activePivots,
+        Boolean(sheetConfig.queryPayload.row_total)
       ).expandedColumns.length;
 
       setStatusText(`Writing ${dataRows.length.toLocaleString()} rows...`);
@@ -603,9 +634,16 @@ export const App: React.FC = () => {
           pivots: activePivots,
           prevRowCount: sheetConfig.rowCount,
           prevColCount: sheetConfig.options?.prevColCount ?? sheetConfig.columns.length,
+          totalsData: bundle.totalsData,
+          subtotalsData: bundle.subtotalsData,
         },
         (pct) => setProgressPercent(pct)
       );
+
+      const totalWrittenDataRows =
+        dataRows.length +
+        (bundle.subtotalsData ? Object.values(bundle.subtotalsData).flat().length : 0) +
+        (bundle.totalsData ? 1 : 0);
 
       const updatedConfig: StoredSheetConfig = {
         ...sheetConfig,
@@ -613,11 +651,11 @@ export const App: React.FC = () => {
           ...sheetConfig.options,
           destination: "active",
           targetSheetId: undefined,
-          prevRowCount: dataRows.length,
+          prevRowCount: totalWrittenDataRows,
           prevColCount: expandedColCount,
         },
         lastRefreshed: new Date().toISOString(),
-        rowCount: dataRows.length,
+        rowCount: totalWrittenDataRows,
       };
       await saveSheetMetadata(updatedConfig, writtenSheetId || sourceSheetId || undefined);
       setSheetConfig(updatedConfig);
@@ -647,12 +685,14 @@ export const App: React.FC = () => {
           validAuth.accessToken,
           s.config.queryPayload
         );
-        const dataRows = await controller.waitForResults(() => {});
+        const bundle = await controller.waitForBundle(() => {});
+        const dataRows = bundle.rows;
         const sPivots = s.config.queryPayload.pivots || undefined;
         const expandedColCount = expandPivotedColumns(
           s.config.columns,
           dataRows,
-          sPivots
+          sPivots,
+          Boolean(s.config.queryPayload.row_total)
         ).expandedColumns.length;
 
         await writeLookerDataToWorksheet(
@@ -665,20 +705,28 @@ export const App: React.FC = () => {
             pivots: sPivots,
             prevRowCount: s.config.rowCount,
             prevColCount: s.config.options?.prevColCount ?? s.config.columns.length,
+            totalsData: bundle.totalsData,
+            subtotalsData: bundle.subtotalsData,
           },
           () => {}
         );
+
+        const totalWrittenDataRows =
+          dataRows.length +
+          (bundle.subtotalsData ? Object.values(bundle.subtotalsData).flat().length : 0) +
+          (bundle.totalsData ? 1 : 0);
+
         await saveSheetMetadata(
           {
             ...s.config,
             options: {
               ...s.config.options,
               destination: "active",
-              prevRowCount: dataRows.length,
+              prevRowCount: totalWrittenDataRows,
               prevColCount: expandedColCount,
             },
             lastRefreshed: new Date().toISOString(),
-            rowCount: dataRows.length,
+            rowCount: totalWrittenDataRows,
           },
           s.sheetId
         );

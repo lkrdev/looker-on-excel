@@ -3,6 +3,8 @@ export interface ColumnDefinition {
   label: string;
   type?: string;
   excelFormat?: string;
+  category?: "dimension" | "measure" | "parameter";
+  isRowTotal?: boolean;
 }
 
 export interface WriteOptions {
@@ -18,29 +20,62 @@ export interface WriteOptions {
   pivots?: string[];
   prevRowCount?: number;
   prevColCount?: number;
+  includeTotals?: boolean;
+  includeRowTotals?: boolean;
+  includeSubtotals?: boolean;
+  totalsData?: Record<string, any> | null;
+  subtotalsData?: Record<string, Record<string, any>[]> | null;
 }
 
 export function calculateBatchSize(colCount: number, targetCellBudget: number = 35000): number {
   return Math.max(500, Math.floor(targetCellBudget / Math.max(1, colCount)));
 }
 
+const CELL_METADATA_KEYS = new Set([
+  "value",
+  "rendered",
+  "html",
+  "has_custom_html",
+  "links",
+  "filterable_value",
+  "drill_fields",
+]);
+
 function isNestedPivotObject(val: any): boolean {
   if (val && typeof val === "object" && !Array.isArray(val)) {
-    const firstInner = Object.values(val)[0];
-    return Boolean(firstInner && typeof firstInner === "object");
+    const entries = Object.entries(val).filter(([k]) => k !== "$$$_row_total_$$$");
+    if (entries.length === 0) return false;
+    // Never treat a Looker json_detail leaf cell object as a pivot dimension map
+    if (entries.some(([k]) => CELL_METADATA_KEYS.has(k) || k === "__pivot_key__")) {
+      return false;
+    }
+    const firstInner = entries[0][1];
+    if (!firstInner || typeof firstInner !== "object" || Array.isArray(firstInner)) {
+      return false;
+    }
+    const innerKeys = Object.keys(firstInner);
+    if (innerKeys.some((ik) => CELL_METADATA_KEYS.has(ik))) {
+      return false;
+    }
+    return true;
   }
   return false;
 }
 
 /**
- * Detects nested pivot structures in Looker JSON query results and expands them
- * into tabular Crosstab columns with appropriate labels and number formatting.
+ * Detects nested pivot structures in Looker JSON / json_detail query results and expands them
+ * into tabular Crosstab columns (including Looker-computed Row Totals when present)
+ * with appropriate labels and number formatting.
  */
 export function expandPivotedColumns(
   columns: ColumnDefinition[],
   dataRows: Record<string, any>[],
-  pivots?: string[]
-): { expandedColumns: ColumnDefinition[]; getValue: (row: Record<string, any>, col: ColumnDefinition) => any } {
+  pivots?: string[],
+  includeRowTotals?: boolean
+): {
+  expandedColumns: ColumnDefinition[];
+  getValue: (row: Record<string, any>, col: ColumnDefinition) => any;
+} {
   if (dataRows.length === 0) {
     return {
       expandedColumns: columns,
@@ -57,7 +92,9 @@ export function expandPivotedColumns(
       const val = row[col.fieldKey];
       if (isNestedPivotObject(val)) {
         pivotedColSample.set(col.fieldKey, val);
-        Object.keys(val).forEach((pf) => discoveredPivotDims.add(pf));
+        Object.keys(val)
+          .filter((pf) => pf !== "$$$_row_total_$$$")
+          .forEach((pf) => discoveredPivotDims.add(pf));
         break;
       }
     }
@@ -77,7 +114,10 @@ export function expandPivotedColumns(
   }
 
   const expandedColumns: ColumnDefinition[] = [];
-  const pivotAccessorMap = new Map<string, { measureKey: string; pivotField: string; pivotVal: string }>();
+  const pivotAccessorMap = new Map<
+    string,
+    { measureKey: string; pivotField: string; pivotVal: string; isRowTotal?: boolean }
+  >();
 
   columns.forEach((col) => {
     // Skip columns that are pivoted dimensions (since their values become column headers)
@@ -87,19 +127,27 @@ export function expandPivotedColumns(
 
     const val = pivotedColSample.get(col.fieldKey);
     if (val) {
-      const pivotFields = Object.keys(val);
+      const pivotFields = Object.keys(val).filter((pf) => pf !== "$$$_row_total_$$$");
       const pivotField = pivotFields[0];
 
-      // Discover all unique pivot values across all dataRows in order
+      // Discover all unique pivot values across all dataRows in order, plus check if $$$_row_total_$$$ exists
       const seenPivotVals = new Set<string>();
+      let hasRowTotalInRows = Boolean(includeRowTotals);
+
       dataRows.forEach((row) => {
-        const inner = row[col.fieldKey]?.[pivotField];
-        if (inner && typeof inner === "object") {
-          Object.keys(inner).forEach((pv) => {
-            if (pv !== "null" || inner[pv] !== 0) {
-              seenPivotVals.add(pv);
-            }
-          });
+        const measureObj = row[col.fieldKey];
+        if (measureObj && typeof measureObj === "object") {
+          if ("$$$_row_total_$$$" in measureObj) {
+            hasRowTotalInRows = true;
+          }
+          const inner = measureObj[pivotField];
+          if (inner && typeof inner === "object") {
+            Object.keys(inner).forEach((pv) => {
+              if (pv !== "null" || inner[pv] !== 0) {
+                seenPivotVals.add(pv);
+              }
+            });
+          }
         }
       });
 
@@ -111,9 +159,28 @@ export function expandPivotedColumns(
           label: `${col.label} (${displayPivotVal})`,
           type: col.type,
           excelFormat: col.excelFormat,
+          category: col.category || "measure",
         });
         pivotAccessorMap.set(key, { measureKey: col.fieldKey, pivotField, pivotVal: pVal });
       });
+
+      if (hasRowTotalInRows) {
+        const rtKey = `__pivot_row_total__:${col.fieldKey}`;
+        expandedColumns.push({
+          fieldKey: rtKey,
+          label: `${col.label} (Row Total)`,
+          type: col.type,
+          excelFormat: col.excelFormat,
+          category: col.category || "measure",
+          isRowTotal: true,
+        });
+        pivotAccessorMap.set(rtKey, {
+          measureKey: col.fieldKey,
+          pivotField,
+          pivotVal: "$$$_row_total_$$$",
+          isRowTotal: true,
+        });
+      }
     } else {
       // Standard dimension/measure column
       expandedColumns.push(col);
@@ -125,6 +192,9 @@ export function expandPivotedColumns(
     getValue: (row, col) => {
       const acc = pivotAccessorMap.get(col.fieldKey);
       if (acc) {
+        if (acc.isRowTotal) {
+          return row[acc.measureKey]?.["$$$_row_total_$$$"];
+        }
         return row[acc.measureKey]?.[acc.pivotField]?.[acc.pivotVal];
       }
       const val = row[col.fieldKey];
@@ -133,6 +203,107 @@ export function expandPivotedColumns(
       }
       return val;
     },
+  };
+}
+
+export interface WorksheetRowMatrixResult {
+  rows: Record<string, any>[];
+  subtotalRowIndices: number[]; // 0-based indices into `rows`
+  grandTotalRowIndex: number | null; // 0-based index into `rows`
+  outlineGroups: Array<{ startRowOffset: number; endRowOffset: number }>; // 0-based inclusive offsets into `rows`
+}
+
+/**
+ * Interleaves Looker-computed `subtotalsData` rows at dimension group breaks and appends
+ * the Looker-computed `totalsData` Grand Total row at the bottom.
+ */
+export function buildWorksheetRowMatrix(
+  columns: ColumnDefinition[],
+  dataRows: Record<string, any>[],
+  subtotalsData?: Record<string, Record<string, any>[]> | null,
+  totalsData?: Record<string, any> | null,
+  pivots?: string[]
+): WorksheetRowMatrixResult {
+  const pivotSet = new Set<string>(pivots || []);
+  const nonPivotDims = columns.filter(
+    (c) => !pivotSet.has(c.fieldKey) && c.category !== "measure" && !c.isRowTotal
+  );
+
+  const outRows: Record<string, any>[] = [];
+  const subtotalRowIndices: number[] = [];
+  const outlineGroups: Array<{ startRowOffset: number; endRowOffset: number }> = [];
+
+  const allSubtotalRows: Record<string, any>[] = subtotalsData
+    ? Object.values(subtotalsData).flat()
+    : [];
+
+  if (allSubtotalRows.length > 0 && nonPivotDims.length >= 2 && dataRows.length > 0) {
+    const primaryDimKey = nonPivotDims[0].fieldKey;
+    const childDimKeys = nonPivotDims.slice(1).map((d) => d.fieldKey);
+
+    let groupStartOffset = 0;
+    for (let i = 0; i < dataRows.length; i++) {
+      const row = dataRows[i];
+      outRows.push(row);
+
+      const currentVal = row[primaryDimKey];
+      const nextVal = i + 1 < dataRows.length ? dataRows[i + 1][primaryDimKey] : Symbol("END");
+
+      if (currentVal !== nextVal) {
+        const groupEndOffset = outRows.length - 1;
+        // Find matching subtotal row from Looker's subtotalsData
+        const matchingSubtotal = allSubtotalRows.find(
+          (sr) =>
+            sr[primaryDimKey] === currentVal &&
+            childDimKeys.every(
+              (ck) => sr[ck] === "$$$_subtotal_$$$" || sr[ck] === null || sr[ck] === undefined
+            )
+        );
+
+        if (matchingSubtotal) {
+          const formattedSub: Record<string, any> = { ...matchingSubtotal };
+          const labelVal =
+            currentVal === null || currentVal === undefined || currentVal === ""
+              ? "None"
+              : String(currentVal);
+          formattedSub[primaryDimKey] = `Subtotal (${labelVal})`;
+          childDimKeys.forEach((ck) => {
+            formattedSub[ck] = "";
+          });
+
+          outRows.push(formattedSub);
+          subtotalRowIndices.push(outRows.length - 1);
+          outlineGroups.push({
+            startRowOffset: groupStartOffset,
+            endRowOffset: groupEndOffset,
+          });
+        }
+        groupStartOffset = outRows.length;
+      }
+    }
+  } else {
+    outRows.push(...dataRows);
+  }
+
+  let grandTotalRowIndex: number | null = null;
+  if (totalsData && Object.keys(totalsData).length > 0) {
+    const grandTotalRow: Record<string, any> = { ...totalsData };
+    const firstColKey = nonPivotDims[0]?.fieldKey || columns[0]?.fieldKey;
+    if (firstColKey) {
+      grandTotalRow[firstColKey] = "Grand Total";
+    }
+    nonPivotDims.slice(1).forEach((d) => {
+      grandTotalRow[d.fieldKey] = "";
+    });
+    outRows.push(grandTotalRow);
+    grandTotalRowIndex = outRows.length - 1;
+  }
+
+  return {
+    rows: outRows,
+    subtotalRowIndices,
+    grandTotalRowIndex,
+    outlineGroups,
   };
 }
 
@@ -185,11 +356,25 @@ export async function writeLookerDataToWorksheet(
   options: WriteOptions,
   onProgress: (percent: number, currentRow: number) => void
 ): Promise<string> {
-  const { expandedColumns, getValue } = expandPivotedColumns(columns, dataRows, options.pivots);
+  const matrix = buildWorksheetRowMatrix(
+    columns,
+    dataRows,
+    options.subtotalsData,
+    options.totalsData,
+    options.pivots
+  );
+  const effectiveRows = matrix.rows;
+  const { expandedColumns, getValue } = expandPivotedColumns(
+    columns,
+    effectiveRows,
+    options.pivots,
+    options.includeRowTotals
+  );
   const colCount = Math.max(1, expandedColumns.length);
-  const totalRows = dataRows.length;
+  const totalRows = effectiveRows.length;
   const batchSize = calculateBatchSize(colCount);
   const nullVal = options.nullDisplay ?? "";
+  const hasSubtotals = matrix.subtotalRowIndices.length > 0;
   let writtenSheetId = "";
 
   await Excel.run(async (context) => {
@@ -260,15 +445,22 @@ export async function writeLookerDataToWorksheet(
 
     try {
       // 2. Inspect existing Looker table & PivotTables on this sheet.
-      // IMPORTANT: Never use sheet.getUsedRange() for prevTotalRows/Cols because usedRange
-      // includes any PivotTables or side-by-side analysis the user placed to the right or below
-      // the Looker table, which would cause clear() to throw:
-      // "The operation failed because it conflicts with a pivot table range."
       let prevTotalRows = options.prevRowCount ? options.prevRowCount + 1 : 0;
       let prevTotalCols = options.prevColCount || 0;
       let existingTable: Excel.Table | null = null;
       let savedTableName: string | null = null;
       let pivotRanges: Array<{ top: number; bottom: number; left: number; right: number }> = [];
+
+      // Clear any previous row outline groupings before writing new data
+      if (!isCreatingNewSheet && prevTotalRows > 1) {
+        try {
+          const prevDataRng = sheet.getRangeByIndexes(1, 0, prevTotalRows, Math.max(1, prevTotalCols));
+          prevDataRng.ungroup(Excel.GroupOption.byRows);
+          await context.sync();
+        } catch {
+          // Ignore if no row groups existed
+        }
+      }
 
       if (!isCreatingNewSheet) {
         try {
@@ -278,7 +470,6 @@ export async function writeLookerDataToWorksheet(
           sheetPivots.load(["items/name"]);
           await context.sync();
 
-          // Record bounding boxes of any PivotTables on the same worksheet so we never clear into them
           if (sheetPivots.items.length > 0) {
             const pLayouts = sheetPivots.items.map((pt) => {
               const rng = pt.layout.getRange();
@@ -304,8 +495,9 @@ export async function writeLookerDataToWorksheet(
             prevTotalRows = Math.max(prevTotalRows, tableRange.rowIndex + tableRange.rowCount);
             prevTotalCols = Math.max(prevTotalCols, tableRange.columnIndex + tableRange.columnCount);
 
-            // Only convert to range if the user explicitly unchecked "Create Native Excel Table"
-            if (!options.useExcelTable) {
+            // Convert to range if user unchecked "Create Native Excel Table" OR if Looker Subtotals
+            // with row outline grouping are enabled (Excel prevents grouping rows inside a ListObject).
+            if (!options.useExcelTable || hasSubtotals) {
               existingTable.convertToRange();
               existingTable = null;
               await context.sync();
@@ -316,8 +508,12 @@ export async function writeLookerDataToWorksheet(
         }
       }
 
-      // Helper to check if a target range [r0..r1, c0..c1] overlaps any PivotTable on this worksheet
-      const overlapsPivotTable = (startRow: number, startCol: number, rowCount: number, colCount: number): boolean => {
+      const overlapsPivotTable = (
+        startRow: number,
+        startCol: number,
+        rowCount: number,
+        colCount: number
+      ): boolean => {
         const r1 = startRow + rowCount - 1;
         const c1 = startCol + colCount - 1;
         return pivotRanges.some(
@@ -325,11 +521,12 @@ export async function writeLookerDataToWorksheet(
         );
       };
 
-      // 2.2 Guard against writing onto a PivotTable worksheet:
-      // If the resolved sheet has no Looker table and a PivotTable occupies the top-left write range
-      // (e.g., user created a PivotTable on a New Worksheet and triggered Import/Refresh while that
-      // PivotTable sheet was active), resolve the Looker source sheet or create a new sheet.
-      if (!isCreatingNewSheet && !existingTable && overlapsPivotTable(0, 0, Math.max(1, totalRows + 1), colCount)) {
+      // 2.2 Guard against writing onto a PivotTable worksheet
+      if (
+        !isCreatingNewSheet &&
+        !existingTable &&
+        overlapsPivotTable(0, 0, Math.max(1, totalRows + 1), colCount)
+      ) {
         const allSheets = context.workbook.worksheets;
         allSheets.load(["items/id", "items/name"]);
         await context.sync();
@@ -376,8 +573,6 @@ export async function writeLookerDataToWorksheet(
 
       if (!isCreatingNewSheet) {
         try {
-          // If Looker column count grew or shrank since the previous run, check if we need to shift
-          // whole columns so adjacent user formulas or side-by-side PivotTables move cleanly.
           if (options.prevColCount && options.prevColCount > 0 && options.prevColCount !== colCount) {
             const deltaCols = colCount - options.prevColCount;
             const checkFormulaCell = sheet.getRangeByIndexes(1, options.prevColCount, 1, 1);
@@ -388,8 +583,16 @@ export async function writeLookerDataToWorksheet(
               checkFormulaCell.formulas[0][0].startsWith("=");
             const hasPivotToRight = pivotRanges.some((p) => p.left >= options.prevColCount!);
 
-            if (deltaCols > 0 && (hasFormulaAtPrevBoundary || overlapsPivotTable(0, options.prevColCount, Math.max(prevTotalRows, totalRows + 1), deltaCols))) {
-              // Insert entire worksheet columns so Excel shifts formulas AND any PivotTables to the right as a whole unit
+            if (
+              deltaCols > 0 &&
+              (hasFormulaAtPrevBoundary ||
+                overlapsPivotTable(
+                  0,
+                  options.prevColCount,
+                  Math.max(prevTotalRows, totalRows + 1),
+                  deltaCols
+                ))
+            ) {
               const insertColRng = sheet
                 .getRangeByIndexes(0, options.prevColCount, 1, deltaCols)
                 .getEntireColumn();
@@ -420,7 +623,6 @@ export async function writeLookerDataToWorksheet(
             await context.sync();
 
             for (let offset = 0; offset < maxFormulaColsToScan; offset++) {
-              // Do not scan into a PivotTable
               if (overlapsPivotTable(0, colCount + offset, 2, 1)) {
                 break;
               }
@@ -450,17 +652,19 @@ export async function writeLookerDataToWorksheet(
       }
 
       const protectedCols = colCount + savedFormulaCols.length;
+      const listObjectBodyRows =
+        matrix.grandTotalRowIndex !== null ? totalRows - 1 : totalRows;
 
-      // 2.7 If an existing native Excel Table is shrinking in rows or columns,
-      // shrink-resize the Table BEFORE clearing residual cells so the residual cells are outside the Table.
+      // 2.7 Shrink-resize existing native Excel Table before clearing residual cells
       if (
         existingTable &&
         options.useExcelTable &&
-        totalRows > 0 &&
-        (totalRows + 1 < prevTotalRows || protectedCols < prevTotalCols)
+        !hasSubtotals &&
+        listObjectBodyRows > 0 &&
+        (listObjectBodyRows + 1 < prevTotalRows || protectedCols < prevTotalCols)
       ) {
         try {
-          const shrinkRows = Math.min(prevTotalRows, totalRows + 1);
+          const shrinkRows = Math.min(prevTotalRows, listObjectBodyRows + 1);
           const shrinkCols = Math.min(prevTotalCols, protectedCols);
           const shrinkRange = sheet.getRangeByIndexes(0, 0, shrinkRows, shrinkCols);
           existingTable.resize(shrinkRange);
@@ -470,7 +674,7 @@ export async function writeLookerDataToWorksheet(
         }
       }
 
-      // 2.8 Clear residual rows and columns from previous larger runs (skipping any PivotTable range)
+      // 2.8 Clear residual rows and columns from previous larger runs
       if (!isCreatingNewSheet && (prevTotalRows > 0 || prevTotalCols > 0)) {
         const { extraColRange, extraRowRange } = computeResidualRanges(
           prevTotalRows,
@@ -526,7 +730,7 @@ export async function writeLookerDataToWorksheet(
         }
       }
 
-      // 3. Write Header (deduplicate labels across Looker + preserved formula columns so Excel Table headers are always unique)
+      // 3. Write Header
       const seenHeaders = new Map<string, number>();
       const deduplicateHeader = (raw: string): string => {
         const base = (raw || "Column").trim();
@@ -560,11 +764,17 @@ export async function writeLookerDataToWorksheet(
       // 4. Batch write data in dynamic chunks
       let currentRow = 1;
       for (let i = 0; i < totalRows; i += batchSize) {
-        const slice = dataRows.slice(i, i + batchSize);
+        const slice = effectiveRows.slice(i, i + batchSize);
         const rowBlock: (string | number | boolean)[][] = slice.map((item) =>
           expandedColumns.map((col) => {
             const val = getValue(item, col);
             if (val === null || val === undefined) {
+              return nullVal;
+            }
+            if (typeof val === "object") {
+              if ("value" in val && (val.value === null || typeof val.value !== "object")) {
+                return val.value ?? nullVal;
+              }
               return nullVal;
             }
             return val;
@@ -578,15 +788,13 @@ export async function writeLookerDataToWorksheet(
         await context.sync();
 
         onProgress(Math.min(100, Math.round((currentRow / totalRows) * 100)), currentRow);
-        // Yield to browser event loop for smooth UI rendering
         await new Promise((r) => setTimeout(r, 0));
       }
 
-      // 5. Resize or Create Native Excel Table (ListObject) BEFORE formula expansion
-      // so Table Structured References (e.g. =[@[Sale Price]]*0.2) remain valid inside the Table!
+      // 5. Resize or Create Native Excel Table (ListObject) on data rows (excluding Looker Grand Total row)
       try {
-        if (options.useExcelTable && totalRows > 0) {
-          const fullRange = sheet.getRangeByIndexes(0, 0, totalRows + 1, protectedCols);
+        if (options.useExcelTable && !hasSubtotals && listObjectBodyRows > 0) {
+          const fullRange = sheet.getRangeByIndexes(0, 0, listObjectBodyRows + 1, protectedCols);
           if (existingTable) {
             existingTable.resize(fullRange);
             if (options.tableStyle) {
@@ -601,6 +809,54 @@ export async function writeLookerDataToWorksheet(
         }
       } catch (err) {
         console.warn("Could not configure/resize native Excel table (ListObject):", err);
+      }
+
+      // 5.5 Apply Semantic Styling for Row Totals, Subtotals, Row Outline Groups, and Grand Total
+      try {
+        // Style Row Total columns
+        if (totalRows > 0) {
+          for (let c = 0; c < colCount; c++) {
+            if (expandedColumns[c]?.isRowTotal) {
+              const rtColRng = sheet.getRangeByIndexes(1, c, totalRows, 1);
+              rtColRng.format.font.bold = true;
+              rtColRng.format.fill.color = "#F8F9FA";
+            }
+          }
+        }
+
+        // Style Subtotal rows and apply Excel Row Outline Grouping
+        if (hasSubtotals) {
+          for (const subRowIdx of matrix.subtotalRowIndices) {
+            const sheetRow = subRowIdx + 1;
+            const subRng = sheet.getRangeByIndexes(sheetRow, 0, 1, colCount);
+            subRng.format.font.bold = true;
+            subRng.format.fill.color = "#F3F2F1";
+            subRng.format.borders.getItem("EdgeTop").style = Excel.BorderLineStyle.continuous;
+            subRng.format.borders.getItem("EdgeBottom").style = Excel.BorderLineStyle.continuous;
+          }
+
+          for (const grp of matrix.outlineGroups) {
+            const rowCountGrp = grp.endRowOffset - grp.startRowOffset + 1;
+            if (rowCountGrp > 0) {
+              const grpRng = sheet.getRangeByIndexes(grp.startRowOffset + 1, 0, rowCountGrp, colCount);
+              grpRng.group(Excel.GroupOption.byRows);
+            }
+          }
+        }
+
+        // Style Grand Total row
+        if (matrix.grandTotalRowIndex !== null) {
+          const gtSheetRow = matrix.grandTotalRowIndex + 1;
+          const gtRng = sheet.getRangeByIndexes(gtSheetRow, 0, 1, colCount);
+          gtRng.format.font.bold = true;
+          gtRng.format.fill.color = "#E8F0FE";
+          gtRng.format.borders.getItem("EdgeTop").style = Excel.BorderLineStyle.continuous;
+          gtRng.format.borders.getItem("EdgeBottom").style = Excel.BorderLineStyle.double;
+        }
+
+        await context.sync();
+      } catch (e) {
+        console.warn("Could not apply totals/subtotals styling:", e);
       }
 
       // 6. Apply Column-Level Number Formats (isolated sync)
@@ -619,8 +875,9 @@ export async function writeLookerDataToWorksheet(
         console.warn("Could not apply number formats:", e);
       }
 
-      // 7. Restore & Auto-expand adjacent formula columns down to totalRows (isolated sync)
-      if (options.autoExpandFormulas && savedFormulaCols.length > 0 && totalRows >= 1) {
+      // 7. Restore & Auto-expand adjacent formula columns down to listObjectBodyRows (isolated sync)
+      const formulaRowCount = listObjectBodyRows > 0 ? listObjectBodyRows : totalRows;
+      if (options.autoExpandFormulas && savedFormulaCols.length > 0 && formulaRowCount >= 1) {
         for (let idx = 0; idx < savedFormulaCols.length; idx++) {
           const fCol = savedFormulaCols[idx];
           try {
@@ -632,8 +889,8 @@ export async function writeLookerDataToWorksheet(
             formulaOrigin.formulas = [[fCol.formula]];
             await context.sync();
 
-            if (totalRows > 1) {
-              const formulaTarget = sheet.getRangeByIndexes(1, targetColIndex, totalRows, 1);
+            if (formulaRowCount > 1) {
+              const formulaTarget = sheet.getRangeByIndexes(1, targetColIndex, formulaRowCount, 1);
               try {
                 formulaTarget.copyFrom(formulaOrigin, Excel.RangeCopyType.formulas);
                 await context.sync();
@@ -644,7 +901,7 @@ export async function writeLookerDataToWorksheet(
             }
 
             if (fCol.numberFormat) {
-              const fmtRange = sheet.getRangeByIndexes(1, targetColIndex, totalRows, 1);
+              const fmtRange = sheet.getRangeByIndexes(1, targetColIndex, formulaRowCount, 1);
               fmtRange.numberFormat = [[fCol.numberFormat]];
               await context.sync();
             }
@@ -673,14 +930,14 @@ export async function writeLookerDataToWorksheet(
       }
     } finally {
       // 10. Always restore calculation mode
-      if (prevCalcMode) {
-        try {
+      try {
+        if (prevCalcMode) {
           app.calculationMode = prevCalcMode;
-        } catch (e) {
-          console.warn("Could not restore calculationMode:", e);
         }
+        await context.sync();
+      } catch (e) {
+        console.warn("Could not restore calculationMode:", e);
       }
-      await context.sync();
     }
   });
 

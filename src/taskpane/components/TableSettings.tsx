@@ -167,6 +167,49 @@ export const TableSettings: React.FC<TableSettingsProps> = ({
                 </div>
               )}
 
+              {/* Looker Semantic Totals & Subtotals */}
+              <div className={styles.row}>
+                <Label size="small" weight="semibold">
+                  Semantic Totals & Subtotals (Looker SQL)
+                </Label>
+                <Checkbox
+                  checked={options.includeTotals ?? false}
+                  onChange={(_, data) => onOptionsChange({ includeTotals: !!data.checked })}
+                  label={
+                    <div>
+                      <span style={{ fontSize: "12px", fontWeight: 600 }}>Include Column Grand Totals</span>
+                      <Caption1 style={{ color: tokens.colorNeutralForeground3, display: "block" }}>
+                        Evaluates non-additive totals (count_distinct, ratios) in Looker SQL.
+                      </Caption1>
+                    </div>
+                  }
+                />
+                <Checkbox
+                  checked={options.includeRowTotals ?? false}
+                  onChange={(_, data) => onOptionsChange({ includeRowTotals: !!data.checked })}
+                  label={
+                    <div>
+                      <span style={{ fontSize: "12px", fontWeight: 600 }}>Include Row Totals (when Pivoted)</span>
+                      <Caption1 style={{ color: tokens.colorNeutralForeground3, display: "block" }}>
+                        Adds a Looker-evaluated Row Total column across pivoted dimensions.
+                      </Caption1>
+                    </div>
+                  }
+                />
+                <Checkbox
+                  checked={options.includeSubtotals ?? false}
+                  onChange={(_, data) => onOptionsChange({ includeSubtotals: !!data.checked })}
+                  label={
+                    <div>
+                      <span style={{ fontSize: "12px", fontWeight: 600 }}>Include Dimension Subtotals</span>
+                      <Caption1 style={{ color: tokens.colorNeutralForeground3, display: "block" }}>
+                        Computes Looker SQL subtotals with collapsible Excel row groups.
+                      </Caption1>
+                    </div>
+                  }
+                />
+              </div>
+
               {/* Enterprise SAC Benchmarks */}
               <div className={styles.row}>
                 <Checkbox
