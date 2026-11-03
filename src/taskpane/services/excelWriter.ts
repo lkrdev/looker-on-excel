@@ -320,6 +320,18 @@ function readNestedPath(obj: any, path: string[]): any {
   return curr;
 }
 
+const ADDITIVE_MEASURE_TYPES = new Set([
+  "sum",
+  "sum_distinct",
+  "count",
+  "running_total",
+]);
+
+export function isAdditiveMeasure(col: ColumnDefinition): boolean {
+  const t = (col.type || "").toLowerCase();
+  return ADDITIVE_MEASURE_TYPES.has(t);
+}
+
 /**
  * Detects nested pivot structures in Looker JSON / json_detail query results and expands them
  * into tabular Crosstab columns (including multi-dimension pivots, cohort vs. measure grouping,
@@ -385,7 +397,7 @@ export function expandPivotedColumns(
       path: string[];
       isRowTotal?: boolean;
       summaryChildPaths?: string[][];
-      isAverageMeasure?: boolean;
+      isAdditive?: boolean;
     }
   >();
 
@@ -474,15 +486,6 @@ export function expandPivotedColumns(
     globalCohortOrder.reduce((maxD, c) => Math.max(maxD, c.pivotValues.length), 0)
   );
 
-  const isRateOrAvgMeasure = (col: ColumnDefinition): boolean => {
-    const t = (col.type || "").toLowerCase();
-    return (
-      t.includes("average") ||
-      t.includes("percent") ||
-      Boolean(col.excelFormat && col.excelFormat.includes("%"))
-    );
-  };
-
   const createPivotCol = (col: ColumnDefinition, cohort: CohortInfo): ColumnDefinition => {
     const key = `__pivot__:${col.fieldKey}:::${cohort.pivotKey}`;
     const displayCohort = cohort.pivotValues.join(" · ");
@@ -534,7 +537,7 @@ export function expandPivotedColumns(
       measureKey: col.fieldKey,
       path: [],
       summaryChildPaths,
-      isAverageMeasure: isRateOrAvgMeasure(col),
+      isAdditive: isAdditiveMeasure(col),
     });
 
     const displayPrefix = [...parentValues.slice(0, headerRowOffset), `${prefix} ${groupLabel}`]
@@ -755,6 +758,7 @@ export function expandPivotedColumns(
           return row[acc.measureKey]?.["$$$_row_total_$$$"];
         }
         if (acc.summaryChildPaths && acc.summaryChildPaths.length > 0) {
+          if (!acc.isAdditive) return null;
           const measureObj = row[acc.measureKey];
           if (!measureObj || typeof measureObj !== "object") return null;
           const nums: number[] = [];
@@ -766,8 +770,7 @@ export function expandPivotedColumns(
             }
           }
           if (nums.length === 0) return null;
-          const total = nums.reduce((accSum, v) => accSum + v, 0);
-          return acc.isAverageMeasure ? total / nums.length : total;
+          return nums.reduce((accSum, v) => accSum + v, 0);
         }
         return readNestedPath(row[acc.measureKey], acc.path);
       }

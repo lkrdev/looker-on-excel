@@ -3,6 +3,7 @@ import {
   expandPivotedColumns,
   buildCrosstabHeaderMatrix,
   computeColumnTreeHiddenFlags,
+  isAdditiveMeasure,
   ColumnDefinition,
 } from "../src/taskpane/services/excelWriter";
 import { normalizeQueryResult } from "../src/taskpane/services/queryTaskRunner";
@@ -138,8 +139,15 @@ const mockColumns: ColumnDefinition[] = [
   assert.deepEqual(collapsedFlags, [false, false, true, true, true]);
 }
 
-// 2. Average/Percent measure aggregation & `all_collapsed` defaultColumnDisplayLevel
+// 2. Additive measure summation vs. non-additive measure `null` safety & `all_collapsed` defaultColumnDisplayLevel
 {
+  assert.equal(isAdditiveMeasure({ fieldKey: "m1", label: "M1", type: "sum" }), true);
+  assert.equal(isAdditiveMeasure({ fieldKey: "m2", label: "M2", type: "count" }), true);
+  assert.equal(isAdditiveMeasure({ fieldKey: "m3", label: "M3", type: "sum_distinct" }), true);
+  assert.equal(isAdditiveMeasure({ fieldKey: "m4", label: "M4", type: "average" }), false);
+  assert.equal(isAdditiveMeasure({ fieldKey: "m5", label: "M5", type: "count_distinct" }), false);
+  assert.equal(isAdditiveMeasure({ fieldKey: "m6", label: "M6", type: "number" }), false);
+
   const pivots = ["orders.quarter", "orders.month"];
   const mockJsonDetail = {
     pivots: [
@@ -192,9 +200,9 @@ const mockColumns: ColumnDefinition[] = [
   assert.equal(columnTreeNodes[0].childColEndOffset, 6);
   assert.deepEqual(expandedColumns[1].pivotValues, ["▸ Q1", ""]);
 
-  // Sum measure sums (100 + 200 = 300), average measure averages ((0.2 + 0.4) / 2 = 0.3)
+  // Additive `sum` measure sums (100 + 200 = 300); non-additive `average` measure returns `null`
   assert.equal(getValue(bundle.rows[0], expandedColumns[1]), 300);
-  assert.ok(Math.abs(getValue(bundle.rows[0], expandedColumns[2]) - 0.3) < 1e-6);
+  assert.equal(getValue(bundle.rows[0], expandedColumns[2]), null);
 
   const hiddenFlags = computeColumnTreeHiddenFlags(expandedColumns.length, columnTreeNodes);
   assert.deepEqual(hiddenFlags, [false, false, false, true, true, true, true]);
