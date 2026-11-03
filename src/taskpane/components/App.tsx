@@ -44,6 +44,8 @@ import {
   resolveEffectiveColumnsForWrite,
   parseCellAddress,
   formatCellAddress,
+  getEffectiveHeaderRowCount,
+  setWorksheetBannerLoadingState,
   toggleWorksheetTreeNode,
   applyWorksheetTreeDisplayLevel,
   ColumnDefinition,
@@ -117,6 +119,7 @@ export const App: React.FC = () => {
     includeTotals: false,
     includeRowTotals: false,
     includeSubtotals: false,
+    showSourceBanner: true,
     anchorCell: "A1",
   });
 
@@ -181,7 +184,8 @@ export const App: React.FC = () => {
       const { startRow: tblRow, startCol: tblCol } = parseCellAddress(
         config.anchorCell || config.options.anchorCell || "A1"
       );
-      if (selCol === tblCol && selRow >= tblRow + 1) {
+      const { totalHeaderRowCount } = getEffectiveHeaderRowCount(config.options);
+      if (selCol === tblCol && selRow >= tblRow + totalHeaderRowCount) {
         try {
           togglingTreeNodeRef.current = true;
           const updatedNodes = await toggleWorksheetTreeNode(
@@ -701,8 +705,22 @@ export const App: React.FC = () => {
           ? getSiblingTableBoundingBoxes(allSheetTables, effectiveTableId, effectiveAnchor)
           : [];
 
+      const defaultBannerTitle = [
+        models.find((m) => m.name === selectedModel)?.label || selectedModel,
+        exploreDetail.label || selectedExplore,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      const resolvedPivotDimensionLabels = pivots.map((pKey) => {
+        const def = allAvailableFields.find((f) => f.name === pKey);
+        return def?.label_short || def?.label || pKey;
+      });
+
       const writeOptions: WriteOptions = {
         ...tableOptions,
+        sourceBannerTitle: tableOptions.sourceBannerTitle || defaultBannerTitle,
+        pivotDimensionLabels:
+          resolvedPivotDimensionLabels.length > 0 ? resolvedPivotDimensionLabels : undefined,
         rowGroupFields: orderedNonPivotDims,
         anchorCell: effectiveAnchor,
         tableId: effectiveTableId,
@@ -848,6 +866,27 @@ export const App: React.FC = () => {
         subtotals: subtotalsList,
       };
 
+      const refreshBannerTitle =
+        mergedOptions.sourceBannerTitle ||
+        [sheetConfig.modelLabel || effectivePayload.model, sheetConfig.exploreLabel || effectivePayload.view]
+          .filter(Boolean)
+          .join(" · ");
+      const refreshPivotLabels = (activePivots || []).map((pKey) => {
+        const col = activeColumns.find((c) => c.fieldKey === pKey);
+        const def = allAvailableFields.find((f) => f.name === pKey);
+        return col?.label || def?.label_short || def?.label || pKey;
+      });
+
+      await setWorksheetBannerLoadingState(
+        sourceSheetId || undefined,
+        {
+          ...mergedOptions,
+          anchorCell: sheetConfig.anchorCell || mergedOptions.anchorCell || "A1",
+          sourceBannerTitle: refreshBannerTitle,
+        },
+        true
+      );
+
       const controller = await runQueryTask(
         validAuth.baseUrl,
         validAuth.accessToken,
@@ -890,6 +929,11 @@ export const App: React.FC = () => {
       setStatusText(`Writing ${dataRows.length.toLocaleString()} rows...`);
       const writeOpts: WriteOptions = {
         ...mergedOptions,
+        sourceBannerTitle: refreshBannerTitle,
+        pivotDimensionLabels:
+          refreshPivotLabels.length > 0
+            ? refreshPivotLabels
+            : mergedOptions.pivotDimensionLabels,
         rowGroupFields: nonPivotDims,
         anchorCell: effectiveAnchor,
         tableId: effectiveTableId,
@@ -1193,8 +1237,19 @@ export const App: React.FC = () => {
           ? getSiblingTableBoundingBoxes(allSheetTables, effectiveTableId, effectiveAnchor)
           : [];
 
+      const resolvedPivotDimensionLabels = (orderedPayload.pivots || []).map((pKey) => {
+        const def = allAvailableFields.find((f) => f.name === pKey);
+        return def?.label_short || def?.label || pKey;
+      });
+
       const writeOptions: WriteOptions = {
         ...tableOptions,
+        sourceBannerTitle:
+          tableOptions.sourceBannerTitle ||
+          sheetTitle ||
+          [payload.model, expMeta?.label || payload.view].filter(Boolean).join(" · "),
+        pivotDimensionLabels:
+          resolvedPivotDimensionLabels.length > 0 ? resolvedPivotDimensionLabels : undefined,
         anchorCell: effectiveAnchor,
         tableId: effectiveTableId,
         siblingTableRanges: siblingRanges,

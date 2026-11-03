@@ -5,6 +5,7 @@ import {
   BoundingBox,
   parseCellAddress,
   formatCellAddress,
+  getEffectiveHeaderRowCount,
 } from "./excelWriter";
 import { FilterCondition } from "../components/FilterBuilder";
 
@@ -36,7 +37,8 @@ export function normalizeTableConfigBounds(config: StoredSheetConfig): StoredShe
   const anchor = (config.anchorCell || config.options?.anchorCell || "A1").toUpperCase();
   const { startRow, startCol } = parseCellAddress(anchor);
   const colSpan = Math.max(1, config.options?.prevColCount || config.columns?.length || 1);
-  const rowSpan = Math.max(1, (config.rowCount || 0) + 1); // +1 for header row
+  const { totalHeaderRowCount } = getEffectiveHeaderRowCount(config.options);
+  const rowSpan = Math.max(1, (config.rowCount || 0) + totalHeaderRowCount);
   const tableId =
     config.tableId || config.options?.tableId || `Looker_${anchor}`;
 
