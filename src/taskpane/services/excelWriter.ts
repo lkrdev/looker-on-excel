@@ -93,6 +93,19 @@ export interface WriteOptions {
   enableColumnGroups?: boolean;
   defaultColumnDisplayLevel?: RowGroupDisplayLevel;
   columnTreeNodes?: ColumnTreeNodeMeta[];
+  measureFormatOverrides?: Record<string, string>;
+}
+
+export function resolveEffectiveColumnNumberFormat(
+  col: ColumnDefinition,
+  options?: WriteOptions
+): string | undefined {
+  const baseKey = col.measureKey || col.fieldKey;
+  const override = options?.measureFormatOverrides?.[baseKey];
+  if (override && override !== "default" && override.trim() !== "") {
+    return override.trim();
+  }
+  return col.excelFormat;
 }
 
 export function getEffectiveHeaderRowCount(options?: WriteOptions): {
@@ -2188,7 +2201,8 @@ export async function writeLookerDataToWorksheet(
       try {
         if (totalRows > 0) {
           for (let c = 0; c < colCount; c++) {
-            const fmt = expandedColumns[c]?.excelFormat;
+            const colDef = expandedColumns[c];
+            const fmt = colDef ? resolveEffectiveColumnNumberFormat(colDef, options) : undefined;
             if (fmt) {
               const colRange = sheet.getRangeByIndexes(
                 startRow + headerRowCount,

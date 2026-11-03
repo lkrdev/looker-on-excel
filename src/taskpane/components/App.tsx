@@ -7,6 +7,12 @@ import {
   MessageBarBody,
   MessageBarActions,
   Button,
+  Select,
+  Label,
+  Caption1,
+  Body2,
+  Input,
+  Badge,
 } from "@fluentui/react-components";
 import { DismissRegular } from "@fluentui/react-icons";
 import { Header, NavigationMode } from "./Header";
@@ -90,6 +96,9 @@ export const App: React.FC = () => {
 
   // View state: 'builder' | 'refresh' and top NavigationMode: 'explore' | 'looks' | 'dashboards'
   const [activeView, setActiveView] = useState<"builder" | "refresh">("builder");
+  const [designerTab, setDesignerTab] = useState<"builder" | "number_format" | "styling">(
+    "builder"
+  );
   const [navMode, setNavMode] = useState<NavigationMode>("explore");
   const [sheetConfig, setSheetConfig] = useState<StoredSheetConfig | null>(null);
   const [allSheetTables, setAllSheetTables] = useState<StoredSheetConfig[]>([]);
@@ -1555,47 +1564,218 @@ export const App: React.FC = () => {
                   exploreName={selectedExplore}
                 />
 
-                <FieldPicker
-                  dimensions={exploreDetail.fields.dimensions}
-                  measures={exploreDetail.fields.measures}
-                  selectedFields={selectedFields}
-                  onToggleField={handleToggleField}
-                  onClearSelected={handleClearSelected}
-                  sorts={sorts}
-                  onToggleSort={handleToggleSort}
-                  pivots={pivots}
-                  onTogglePivot={handleTogglePivot}
-                  onSetPivots={setPivots}
-                  onReorderFields={setSelectedFields}
-                  options={tableOptions}
-                  onOptionsChange={(upd) => setTableOptions((prev) => ({ ...prev, ...upd }))}
-                />
+                {/* SAC-Style 3-Tab Designer Strip: Builder | Number Format | Styling */}
+                <div
+                  style={{
+                    display: "flex",
+                    borderBottom: `1px solid ${tokens.colorNeutralStroke2}`,
+                    margin: "0 16px 10px 16px",
+                    gap: "4px",
+                  }}
+                >
+                  {(
+                    [
+                      { id: "builder", label: "Builder" },
+                      { id: "number_format", label: "Number Format" },
+                      { id: "styling", label: "Styling" },
+                    ] as const
+                  ).map((tab) => {
+                    const isActive = designerTab === tab.id;
+                    return (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        onClick={() => setDesignerTab(tab.id)}
+                        style={{
+                          flex: 1,
+                          padding: "7px 6px",
+                          background: "transparent",
+                          border: "none",
+                          borderBottom: isActive
+                            ? `2px solid ${tokens.colorBrandStroke1}`
+                            : "2px solid transparent",
+                          color: isActive
+                            ? tokens.colorBrandForeground1
+                            : tokens.colorNeutralForeground2,
+                          fontWeight: isActive ? 700 : 500,
+                          fontSize: "12px",
+                          cursor: "pointer",
+                        }}
+                      >
+                        {tab.label}
+                      </button>
+                    );
+                  })}
+                </div>
 
-                <FilterBuilder
-                  fields={[...exploreDetail.fields.dimensions, ...exploreDetail.fields.measures]}
-                  filters={filters}
-                  onAddFilter={handleAddFilter}
-                  onUpdateFilter={handleUpdateFilter}
-                  onRemoveFilter={handleRemoveFilter}
-                  baseUrl={auth?.baseUrl}
-                  token={auth?.accessToken}
-                  modelName={selectedModel}
-                  exploreName={selectedExplore}
-                />
+                {designerTab === "builder" && (
+                  <FieldPicker
+                    dimensions={exploreDetail.fields.dimensions}
+                    measures={exploreDetail.fields.measures}
+                    selectedFields={selectedFields}
+                    onToggleField={handleToggleField}
+                    onClearSelected={handleClearSelected}
+                    sorts={sorts}
+                    onToggleSort={handleToggleSort}
+                    pivots={pivots}
+                    onTogglePivot={handleTogglePivot}
+                    onSetPivots={setPivots}
+                    onReorderFields={setSelectedFields}
+                    options={tableOptions}
+                    onOptionsChange={(upd) => setTableOptions((prev) => ({ ...prev, ...upd }))}
+                    filterSlot={
+                      <FilterBuilder
+                        embedded
+                        fields={[
+                          ...exploreDetail.fields.dimensions,
+                          ...exploreDetail.fields.measures,
+                        ]}
+                        filters={filters}
+                        onAddFilter={handleAddFilter}
+                        onUpdateFilter={handleUpdateFilter}
+                        onRemoveFilter={handleRemoveFilter}
+                        baseUrl={auth?.baseUrl}
+                        token={auth?.accessToken}
+                        modelName={selectedModel}
+                        exploreName={selectedExplore}
+                      />
+                    }
+                  />
+                )}
 
-                <TableSettings
-                  rowLimit={rowLimit}
-                  onRowLimitChange={setRowLimit}
-                  destination={destination}
-                  onDestinationChange={setDestination}
-                  options={tableOptions}
-                  onOptionsChange={(upd) => setTableOptions((prev) => ({ ...prev, ...upd }))}
-                  pivots={pivots}
-                  selectedMeasureLabels={selectedFields
-                    .map((fk) => exploreDetail.fields.measures.find((m) => m.name === fk))
-                    .filter((m): m is NonNullable<typeof m> => Boolean(m))
-                    .map((m) => m.label_short || m.label || m.name)}
-                />
+                {designerTab === "number_format" && (
+                  <div
+                    style={{
+                      padding: "0 16px 12px 16px",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "12px",
+                    }}
+                  >
+                    <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                      <Label size="small" weight="semibold">
+                        Per-Measure Number Format Overrides
+                      </Label>
+                      <Caption1 style={{ color: tokens.colorNeutralForeground3 }}>
+                        Override LookML default Excel number formatting for selected measures.
+                      </Caption1>
+                      {selectedFields
+                        .map((fk) => exploreDetail.fields.measures.find((m) => m.name === fk))
+                        .filter((m): m is NonNullable<typeof m> => Boolean(m)).length === 0 ? (
+                        <Caption1
+                          style={{
+                            color: tokens.colorNeutralForeground4,
+                            fontStyle: "italic",
+                            padding: "4px 0",
+                          }}
+                        >
+                          Select one or more measures in the Builder tab to configure number formats.
+                        </Caption1>
+                      ) : (
+                        selectedFields
+                          .map((fk) => exploreDetail.fields.measures.find((m) => m.name === fk))
+                          .filter((m): m is NonNullable<typeof m> => Boolean(m))
+                          .map((m) => {
+                            const currentFmt =
+                              tableOptions.measureFormatOverrides?.[m.name] || "";
+                            const defaultLookmlFmt = resolveExcelNumberFormat(m) || "General";
+                            return (
+                              <div
+                                key={m.name}
+                                style={{
+                                  display: "flex",
+                                  flexDirection: "column",
+                                  gap: "4px",
+                                  padding: "8px 10px",
+                                  borderRadius: "6px",
+                                  backgroundColor: tokens.colorNeutralBackground2,
+                                  border: `1px solid ${tokens.colorNeutralStroke2}`,
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                    alignItems: "center",
+                                    gap: "6px",
+                                  }}
+                                >
+                                  <Body2 style={{ fontWeight: 600, fontSize: "12px" }}>
+                                    {m.label_short || m.label || m.name}
+                                  </Body2>
+                                  <Badge size="small" appearance="outline" color="informative">
+                                    LookML: {defaultLookmlFmt}
+                                  </Badge>
+                                </div>
+                                <Select
+                                  size="small"
+                                  value={currentFmt}
+                                  onChange={(_, data) => {
+                                    const nextOverrides = {
+                                      ...(tableOptions.measureFormatOverrides || {}),
+                                    };
+                                    if (!data.value) {
+                                      delete nextOverrides[m.name];
+                                    } else {
+                                      nextOverrides[m.name] = data.value;
+                                    }
+                                    setTableOptions((prev) => ({
+                                      ...prev,
+                                      measureFormatOverrides: nextOverrides,
+                                    }));
+                                  }}
+                                >
+                                  <option value="">
+                                    LookML Default ({defaultLookmlFmt})
+                                  </option>
+                                  <option value="$#,##0.00">Currency ($#,##0.00)</option>
+                                  <option value="$#,##0">Currency Whole ($#,##0)</option>
+                                  <option value="#,##0">Integer (#,##0)</option>
+                                  <option value="#,##0.00">Decimal (#,##0.00)</option>
+                                  <option value="0.0%">Percent (0.0%)</option>
+                                  <option value="0.00%">Percent (0.00%)</option>
+                                </Select>
+                              </div>
+                            );
+                          })
+                      )}
+                    </div>
+
+                    <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                      <Label size="small" weight="semibold">
+                        Null / Empty Value Display
+                      </Label>
+                      <Input
+                        size="small"
+                        placeholder="Leave blank for empty cell (e.g. '-', '0', 'N/A')"
+                        value={tableOptions.nullDisplay || ""}
+                        onChange={(_, data) =>
+                          setTableOptions((prev) => ({ ...prev, nullDisplay: data.value }))
+                        }
+                      />
+                      <Caption1 style={{ color: tokens.colorNeutralForeground3 }}>
+                        Replacement string written to Excel cells when a database value is null.
+                      </Caption1>
+                    </div>
+                  </div>
+                )}
+
+                {designerTab === "styling" && (
+                  <TableSettings
+                    embedded
+                    rowLimit={rowLimit}
+                    onRowLimitChange={setRowLimit}
+                    destination={destination}
+                    onDestinationChange={setDestination}
+                    options={tableOptions}
+                    onOptionsChange={(upd) => setTableOptions((prev) => ({ ...prev, ...upd }))}
+                    pivots={pivots}
+                    selectedMeasureLabels={selectedFields
+                      .map((fk) => exploreDetail.fields.measures.find((m) => m.name === fk))
+                      .filter((m): m is NonNullable<typeof m> => Boolean(m))
+                      .map((m) => m.label_short || m.label || m.name)}
+                  />
+                )}
               </>
             )}
           </div>

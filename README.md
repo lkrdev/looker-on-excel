@@ -75,7 +75,16 @@ flowchart TD
 
 - **Multi-Dimension Column Pivots**: Supports pivoting one or multiple dimensions simultaneously (`pivotsMeta` cohort combinations) while resolving clean display labels for dimensions backed by LookML `case:` or `order_by_field` sort keys.
 - **Measure-First vs. Pivot-Value-First Grouping**: When multiple measures are pivoted, dynamically groups columns either by Measure first (`Measure A [Pivots], Measure B [Pivots]`) or by Pivot Cohort first (`Pivot 1 [Measure A, Measure B]`).
-- **Multi-Row Merged Crosstab Headers**: Optionally renders stacked multi-row crosstab headers with merged Excel cells (`range.merge()`) above measure sub-headers, plus one-click **Swap Rows & Columns** axis transposition.
+- **Multi-Row Merged Crosstab Headers & Corner Pivot Labels**: Optionally renders stacked multi-row crosstab headers with merged Excel cells (`range.merge()`) above measure sub-headers, displays right-aligned pivot dimension labels in the top-left corner cells (`Version`, `Time`) matching SAP Analytics Cloud (SAC) crosstabs, and supports one-click **Swap Rows & Columns** axis transposition.
+- **Interactive Column Hierarchy Expand / Collapse**: Enables collapsible parent cohort summary columns (`▾ Q1 (2021)` / `▸ Q1 (2021)`) across multi-level column pivots (`enableColumnGroups`), supporting both in-sheet click-to-toggle on parent cohort header cells and a taskpane Column Display Level selector (`All Collapsed`, `Level 1`, `Level 2`, `All Expanded`) as well as warehouse drill/collapse along LookML column hierarchies.
+
+### Source Information Banner Row & SAC-Style Designer Taskpane
+
+- **Source Information Banner Row (`showSourceBanner`)**: Renders a merged, styled title banner row directly above the table headers (`Operating_Income_JB` or `Model · Explore`) that transitions to `Loading... <Title>` in italic during background warehouse refreshes while offsetting native Excel Table (`ListObject`) creation, freeze panes, and multi-table bounding boxes by the banner row.
+- **SAC-Style 3-Tab Designer (`Builder` | `Number Format` | `Styling`)**:
+  - **Builder Tab**: Organizes selected fields into dedicated **Rows**, **Columns** (including a draggable **Measures** group token alongside Pivot Dimensions to visually control Measure-first vs. Cohort-first crosstab grouping), and **Filter** buckets above a searchable Field Catalog with `All` / `Dimensions` / `Measures` filter pills.
+  - **Number Format Tab**: Provides per-measure Excel number format overrides (`Currency`, `Whole Currency`, `Integer`, `Decimal`, `Percent`, or `LookML Default`) and custom `Null / Empty Value Display` configuration.
+  - **Styling Tab**: Houses destination anchor cell controls, Source Banner toggles, Excel Table styling, Looker SQL Totals/Subtotals, and Crosstab layout options.
 
 ### Multiple Tables per Worksheet & Custom Start Cell Anchor
 
@@ -320,11 +329,14 @@ Run individual feature test suites directly:
 
 ```bash
 npx tsx tests/totalsAndSubtotals.test.ts
-npx tsx tests/multiTableAndAnchors.test.ts
+npx tsx tests/multiTableMetadata.test.ts
 npx tsx tests/customFunctionsBatcher.test.ts
 npx tsx tests/looksAndDashboards.test.ts
 npx tsx tests/hierarchyResolver.test.ts
-npx tsx tests/pivotsAndSorts.test.ts
+npx tsx tests/crosstabMultiPivot.test.ts
+npx tsx tests/sourceBannerAndCornerLabels.test.ts
+npx tsx tests/columnHierarchyDrill.test.ts
+npx tsx tests/designerBucketsAndFormatting.test.ts
 ```
 
 Compile production distribution:

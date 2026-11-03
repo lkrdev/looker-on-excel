@@ -897,6 +897,7 @@ interface FilterBuilderProps {
   token?: string;
   modelName?: string;
   exploreName?: string;
+  embedded?: boolean;
 }
 
 export const FilterBuilder: React.FC<FilterBuilderProps> = ({
@@ -909,6 +910,7 @@ export const FilterBuilder: React.FC<FilterBuilderProps> = ({
   token,
   modelName,
   exploreName,
+  embedded = false,
 }) => {
   const styles = useStyles();
 
@@ -973,13 +975,19 @@ export const FilterBuilder: React.FC<FilterBuilderProps> = ({
   };
 
   return (
-    <div className={styles.container}>
+    <div
+      className={styles.container}
+      style={embedded ? { padding: 0 } : undefined}
+    >
       <div className={styles.headerRow}>
-        <Caption1 style={{ fontWeight: 600 }}>Filters ({filters.length})</Caption1>
+        <Caption1 style={{ fontWeight: 700, fontSize: "12px" }}>
+          Filter ({filters.length})
+        </Caption1>
         <Button
           size="small"
           appearance="subtle"
           icon={<AddRegular />}
+          style={{ fontSize: "11px", padding: "2px 6px", minWidth: 0 }}
           onClick={onAddFilter}
           disabled={fields.length === 0}
         >

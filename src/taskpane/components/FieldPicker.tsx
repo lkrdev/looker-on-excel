@@ -26,9 +26,10 @@ import {
   ChevronDown16Regular,
   Folder16Regular,
   ReorderRegular,
+  AddRegular,
 } from "@fluentui/react-icons";
 import { FieldDefinition } from "../services/lookerClient";
-import { WriteOptions, RowGroupDisplayLevel } from "../services/excelWriter";
+import { WriteOptions, RowGroupDisplayLevel, PivotGroupMode } from "../services/excelWriter";
 import {
   resolveExploreHierarchies,
   getFieldHierarchyContext,
@@ -128,6 +129,109 @@ interface FieldPickerProps {
   onReorderFields?: (newFields: string[]) => void;
   options?: WriteOptions;
   onOptionsChange?: (updates: Partial<WriteOptions>) => void;
+  filterSlot?: React.ReactNode;
+}
+
+export type ColumnBucketItem =
+  | { type: "measures"; id: "__measures__"; measureKeys: string[] }
+  | { type: "pivot"; id: string; fieldKey: string };
+
+export interface DesignerBucketsPartition {
+  rowDimensionKeys: string[];
+  columnPivotKeys: string[];
+  measureKeys: string[];
+  columnItems: ColumnBucketItem[];
+}
+
+/**
+ * Partitions selected LookML fields into SAC-style Designer buckets:
+ * - `rowDimensionKeys`: non-pivoted selected Dimensions
+ * - `columnPivotKeys`: pivoted Dimensions in pivot order
+ * - `measureKeys`: selected Measures in selection order
+ * - `columnItems`: ordered items inside the `Columns` bucket (draggable `Measures` token + pivot dimensions)
+ */
+export function partitionFieldsIntoBuckets(
+  selectedFields: string[],
+  pivots: string[],
+  dimensions: FieldDefinition[],
+  measures: FieldDefinition[],
+  pivotGroupMode: PivotGroupMode = "measure_first"
+): DesignerBucketsPartition {
+  const dimSet = new Set(dimensions.map((d) => d.name));
+  const measureSet = new Set(measures.map((m) => m.name));
+
+  const rowDimensionKeys = selectedFields.filter(
+    (fk) => dimSet.has(fk) && !pivots.includes(fk)
+  );
+  const columnPivotKeys = pivots.filter((pk) => selectedFields.includes(pk));
+  for (const fk of selectedFields) {
+    if (pivots.includes(fk) && !columnPivotKeys.includes(fk)) {
+      columnPivotKeys.push(fk);
+    }
+  }
+  const measureKeys = selectedFields.filter(
+    (fk) => measureSet.has(fk) || (!dimSet.has(fk) && !pivots.includes(fk))
+  );
+
+  const pivotItems: ColumnBucketItem[] = columnPivotKeys.map((pk) => ({
+    type: "pivot",
+    id: pk,
+    fieldKey: pk,
+  }));
+  const measuresItem: ColumnBucketItem | null =
+    measureKeys.length > 0
+      ? { type: "measures", id: "__measures__", measureKeys }
+      : null;
+
+  let columnItems: ColumnBucketItem[] = [];
+  if (measuresItem) {
+    if (pivotGroupMode === "cohort_first" && pivotItems.length > 0) {
+      columnItems = [...pivotItems, measuresItem];
+    } else {
+      columnItems = [measuresItem, ...pivotItems];
+    }
+  } else {
+    columnItems = [...pivotItems];
+  }
+
+  return {
+    rowDimensionKeys,
+    columnPivotKeys,
+    measureKeys,
+    columnItems,
+  };
+}
+
+/**
+ * Given a reordered list of `ColumnBucketItem`s, computes the updated `pivots` array
+ * and `pivotGroupMode` (`"measure_first"` if `Measures` precedes the first pivot dimension,
+ * or `"cohort_first"` if a pivot dimension precedes `Measures`).
+ */
+export function resolveColumnBucketReorder(items: ColumnBucketItem[]): {
+  pivots: string[];
+  pivotGroupMode: PivotGroupMode;
+} {
+  const nextPivots: string[] = [];
+  let measuresIdx = -1;
+  let firstPivotIdx = -1;
+
+  items.forEach((item, idx) => {
+    if (item.type === "measures") {
+      measuresIdx = idx;
+    } else {
+      if (firstPivotIdx === -1) {
+        firstPivotIdx = idx;
+      }
+      nextPivots.push(item.fieldKey);
+    }
+  });
+
+  const pivotGroupMode: PivotGroupMode =
+    measuresIdx !== -1 && firstPivotIdx !== -1 && firstPivotIdx < measuresIdx
+      ? "cohort_first"
+      : "measure_first";
+
+  return { pivots: nextPivots, pivotGroupMode };
 }
 
 interface SubgroupStructure {
@@ -203,12 +307,19 @@ export const FieldPicker: React.FC<FieldPickerProps> = ({
   onReorderFields,
   options,
   onOptionsChange,
+  filterSlot,
 }) => {
   const styles = useStyles();
   const [searchTerm, setSearchTerm] = useState("");
+  const [catalogCategoryFilter, setCatalogCategoryFilter] = useState<
+    "all" | "dimension" | "measure"
+  >("all");
+  const [addingToPivots, setAddingToPivots] = useState(false);
   const [openSubgroups, setOpenSubgroups] = useState<Record<string, boolean>>({});
-  const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
-  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+  const [draggedRowIdx, setDraggedRowIdx] = useState<number | null>(null);
+  const [dragOverRowIdx, setDragOverRowIdx] = useState<number | null>(null);
+  const [draggedColIdx, setDraggedColIdx] = useState<number | null>(null);
+  const [dragOverColIdx, setDragOverColIdx] = useState<number | null>(null);
 
   const toggleSubgroup = (key: string) => {
     setOpenSubgroups((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -224,10 +335,19 @@ export const FieldPicker: React.FC<FieldPickerProps> = ({
     [dimensions]
   );
 
-  const nonPivotSelectedDims = useMemo(() => {
-    const dimSet = new Set(dimensions.map((d) => d.name));
-    return selectedFields.filter((f) => dimSet.has(f) && !pivots.includes(f));
-  }, [selectedFields, dimensions, pivots]);
+  const buckets = useMemo(
+    () =>
+      partitionFieldsIntoBuckets(
+        selectedFields,
+        pivots,
+        dimensions,
+        measures,
+        options?.pivotGroupMode || "measure_first"
+      ),
+    [selectedFields, pivots, dimensions, measures, options?.pivotGroupMode]
+  );
+
+  const nonPivotSelectedDims = buckets.rowDimensionKeys;
 
   const orderedRowGroupDims = useMemo(() => {
     if (options?.rowGroupFields && options.rowGroupFields.length >= 2) {
@@ -240,11 +360,17 @@ export const FieldPicker: React.FC<FieldPickerProps> = ({
     return nonPivotSelectedDims;
   }, [options?.rowGroupFields, nonPivotSelectedDims]);
 
-  // Filter fields based on search (including LookML synonyms)
+  // Filter fields based on search + category filter (including LookML synonyms)
   const filteredFields = useMemo(() => {
-    if (!searchTerm.trim()) return allFields;
-    return allFields.filter((f) => matchesFieldSearch(f, searchTerm));
-  }, [allFields, searchTerm]);
+    const base =
+      catalogCategoryFilter === "dimension"
+        ? dimensions
+        : catalogCategoryFilter === "measure"
+        ? measures
+        : allFields;
+    if (!searchTerm.trim()) return base;
+    return base.filter((f) => matchesFieldSearch(f, searchTerm));
+  }, [allFields, dimensions, measures, catalogCategoryFilter, searchTerm]);
 
   // Group by view_label, then sub-group by field_group_label / dimension_group
   const viewsHierarchy = useMemo(() => {
@@ -290,6 +416,53 @@ export const FieldPicker: React.FC<FieldPickerProps> = ({
     return result;
   }, [filteredFields]);
 
+  const handleCatalogFieldToggle = (f: FieldDefinition) => {
+    const isAlreadySelected = selectedFields.includes(f.name);
+    onToggleField(f.name);
+    if (
+      !isAlreadySelected &&
+      addingToPivots &&
+      f.category === "dimension" &&
+      !pivots.includes(f.name)
+    ) {
+      if (onSetPivots) {
+        onSetPivots([...pivots, f.name]);
+      } else if (onTogglePivot) {
+        onTogglePivot(f.name);
+      }
+    }
+  };
+
+  const handleReorderRowDimensions = (fromIdx: number, toIdx: number) => {
+    if (!onReorderFields || fromIdx === toIdx) return;
+    const nextRowDims = [...buckets.rowDimensionKeys];
+    const [moved] = nextRowDims.splice(fromIdx, 1);
+    nextRowDims.splice(toIdx, 0, moved);
+    const nextAllFields = [
+      ...nextRowDims,
+      ...buckets.columnPivotKeys,
+      ...buckets.measureKeys,
+    ];
+    onReorderFields(nextAllFields);
+    if (options?.enableRowGroups && onOptionsChange) {
+      onOptionsChange({ rowGroupFields: nextRowDims });
+    }
+  };
+
+  const handleReorderColumnBucket = (fromIdx: number, toIdx: number) => {
+    if (fromIdx === toIdx) return;
+    const nextItems = [...buckets.columnItems];
+    const [moved] = nextItems.splice(fromIdx, 1);
+    nextItems.splice(toIdx, 0, moved);
+    const { pivots: nextPivots, pivotGroupMode } = resolveColumnBucketReorder(nextItems);
+    if (onSetPivots) {
+      onSetPivots(nextPivots);
+    }
+    if (onOptionsChange) {
+      onOptionsChange({ pivotGroupMode });
+    }
+  };
+
   // Render an individual field row with Checkbox, Info popover, and Badges
   const renderFieldRow = (f: FieldDefinition, isNested: boolean = false) => {
     const isSelected = selectedFields.includes(f.name);
@@ -304,7 +477,7 @@ export const FieldPicker: React.FC<FieldPickerProps> = ({
         <div className={styles.fieldLabel}>
           <Checkbox
             checked={isSelected}
-            onChange={() => onToggleField(f.name)}
+            onChange={() => handleCatalogFieldToggle(f)}
             label={
               <div style={{ display: "flex", flexDirection: "column", gap: "1px" }}>
                 <Body2 style={{ fontSize: "12px" }}>{displayName}</Body2>
@@ -398,190 +571,712 @@ export const FieldPicker: React.FC<FieldPickerProps> = ({
 
   return (
     <div className={styles.container}>
-      <Input
-        size="small"
-        contentBefore={<SearchRegular />}
-        placeholder="Search dimensions & measures..."
-        value={searchTerm}
-        onChange={(_, data) => setSearchTerm(data.value)}
-      />
-
-      {/* Selected fields chip drawer */}
-      {selectedFields.length > 0 && (
-        <div>
+      {/* SAC-Style Designer Buckets: Rows & Columns */}
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: "8px",
+        }}
+      >
+        {/* ROWS BUCKET */}
+        <div
+          style={{
+            border: `1px solid ${tokens.colorNeutralStroke2}`,
+            borderRadius: "6px",
+            backgroundColor: tokens.colorNeutralBackground2,
+            padding: "8px 10px",
+            display: "flex",
+            flexDirection: "column",
+            gap: "6px",
+          }}
+        >
           <div
             style={{
               display: "flex",
               justifyContent: "space-between",
               alignItems: "center",
-              marginBottom: "4px",
             }}
           >
-            <Caption1 style={{ fontWeight: 600 }}>
-              Selected Fields ({selectedFields.length})
+            <Caption1 style={{ fontWeight: 700, fontSize: "12px" }}>
+              Rows ({buckets.rowDimensionKeys.length})
             </Caption1>
-            <Button size="small" appearance="subtle" onClick={onClearSelected}>
-              Clear All
-            </Button>
-          </div>
-          <div className={styles.selectedBar}>
-            {selectedFields.map((fieldKey, idx) => {
-              const def = allFields.find((f) => f.name === fieldKey);
-              const isDimension = def?.category === "dimension";
-              const isPivoted = pivots.includes(fieldKey);
-              const sortEntry = sorts.find((s) => s === fieldKey || s.startsWith(`${fieldKey} `));
-              const isAsc = sortEntry === fieldKey || sortEntry === `${fieldKey} asc`;
-              const isDesc = sortEntry === `${fieldKey} desc`;
-              const isDragging = draggedIndex === idx;
-              const isDropTarget = dragOverIndex === idx;
-
-              return (
-                <div
-                  key={fieldKey}
-                  className={styles.selectedChip}
-                  draggable={!!onReorderFields}
-                  onDragStart={(e) => {
-                    setDraggedIndex(idx);
-                    e.dataTransfer.effectAllowed = "move";
-                    e.dataTransfer.setData("text/plain", String(idx));
-                  }}
-                  onDragOver={(e) => {
-                    e.preventDefault();
-                    e.dataTransfer.dropEffect = "move";
-                  }}
-                  onDragEnter={() => setDragOverIndex(idx)}
-                  onDragEnd={() => {
-                    setDraggedIndex(null);
-                    setDragOverIndex(null);
-                  }}
-                  onDrop={(e) => {
-                    e.preventDefault();
-                    if (draggedIndex !== null && draggedIndex !== idx && onReorderFields) {
-                      const next = [...selectedFields];
-                      const [moved] = next.splice(draggedIndex, 1);
-                      next.splice(idx, 0, moved);
-                      onReorderFields(next);
-                    }
-                    setDraggedIndex(null);
-                    setDragOverIndex(null);
-                  }}
-                  style={{
-                    cursor: onReorderFields ? "grab" : "default",
-                    opacity: isDragging ? 0.4 : 1,
-                    border: isDropTarget ? `1px dashed ${tokens.colorBrandStroke1}` : undefined,
-                    backgroundColor: isDropTarget ? tokens.colorBrandBackground2 : undefined,
-                    transition: "border 0.15s ease, background-color 0.15s ease",
-                  }}
-                  title={onReorderFields ? "Drag to reorder column order" : undefined}
-                >
-                  {onReorderFields && (
-                    <ReorderRegular
-                      style={{
-                        fontSize: "12px",
-                        color: tokens.colorNeutralForeground4,
-                        cursor: "grab",
-                        marginRight: "2px",
-                      }}
-                    />
-                  )}
-                  <span style={{ fontWeight: 500 }}>{def?.label || fieldKey}</span>
-
-                  {/* Pivot Toggle for Dimensions */}
-                  {isDimension && onTogglePivot && (
-                    <span
-                      title={isPivoted ? "Remove pivot (Row)" : "Pivot across columns (Column)"}
-                      style={{
-                        cursor: "pointer",
-                        fontSize: "10px",
-                        fontWeight: 600,
-                        padding: "1px 5px",
-                        borderRadius: "8px",
-                        backgroundColor: isPivoted ? tokens.colorBrandBackground : tokens.colorNeutralBackground3,
-                        color: isPivoted ? tokens.colorNeutralForegroundOnBrand : tokens.colorNeutralForeground2,
-                      }}
-                      onClick={() => onTogglePivot(fieldKey)}
-                    >
-                      {isPivoted ? "PIVOT" : "+Pivot"}
-                    </span>
-                  )}
-
-                  {/* Sort Direction Toggle */}
-                  {onToggleSort && (
-                    <span
-                      title={
-                        isAsc
-                          ? "Sorted Ascending. Click to sort Descending."
-                          : isDesc
-                          ? "Sorted Descending. Click to remove sort."
-                          : "Click to sort Ascending."
-                      }
-                      style={{
-                        cursor: "pointer",
-                        fontSize: "11px",
-                        fontWeight: 700,
-                        padding: "1px 4px",
-                        borderRadius: "4px",
-                        color: isAsc || isDesc ? tokens.colorBrandForeground1 : tokens.colorNeutralForeground4,
-                        backgroundColor: isAsc || isDesc ? tokens.colorBrandBackground2 : "transparent",
-                      }}
-                      onClick={() => onToggleSort(fieldKey)}
-                    >
-                      {isAsc ? "↑" : isDesc ? "↓" : "↕"}
-                    </span>
-                  )}
-
-                  <DismissRegular
-                    style={{ cursor: "pointer", fontSize: "12px", marginLeft: "2px" }}
-                    onClick={() => onToggleField(fieldKey)}
-                  />
-                </div>
-              );
-            })}
-          </div>
-
-          {pivots.length > 0 && (
-            <div
-              style={{
-                marginTop: "6px",
-                padding: "6px 8px",
-                backgroundColor: tokens.colorBrandBackground2,
-                borderRadius: "6px",
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                gap: "8px",
+            <Button
+              size="small"
+              appearance="subtle"
+              icon={<AddRegular />}
+              style={{ fontSize: "11px", padding: "2px 6px", minWidth: 0 }}
+              onClick={() => {
+                setCatalogCategoryFilter("dimension");
+                setAddingToPivots(false);
               }}
             >
-              <Caption1 style={{ fontSize: "11px" }}>
-                <strong>Crosstab Active:</strong> {pivots.length} column pivot
-                {pivots.length > 1 ? "s" : ""} (
-                {pivots
-                  .map((p) => allFields.find((f) => f.name === p)?.label_short || p)
-                  .join(" → ")}
-                )
-              </Caption1>
-              {onSetPivots && (
-                <Button
-                  size="small"
-                  appearance="outline"
-                  title="Swap row dimensions and column pivot dimensions"
-                  onClick={() => {
-                    const selectedDims = selectedFields.filter(
-                      (fk) => allFields.find((f) => f.name === fk)?.category === "dimension"
-                    );
-                    const rowDims = selectedDims.filter((d) => !pivots.includes(d));
-                    if (rowDims.length > 0) {
-                      onSetPivots(rowDims);
-                    }
-                  }}
-                >
-                  ⇄ Swap Rows &amp; Columns
-                </Button>
-              )}
+              Add Row Dim
+            </Button>
+          </div>
+
+          {buckets.rowDimensionKeys.length === 0 ? (
+            <Caption1
+              style={{
+                color: tokens.colorNeutralForeground4,
+                fontStyle: "italic",
+                fontSize: "11px",
+              }}
+            >
+              Select dimensions below to group rows.
+            </Caption1>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+              {buckets.rowDimensionKeys.map((fieldKey, idx) => {
+                const def = allFields.find((f) => f.name === fieldKey);
+                const sortEntry = sorts.find(
+                  (s) => s === fieldKey || s.startsWith(`${fieldKey} `)
+                );
+                const isAsc = sortEntry === fieldKey || sortEntry === `${fieldKey} asc`;
+                const isDesc = sortEntry === `${fieldKey} desc`;
+                const isDragging = draggedRowIdx === idx;
+                const isDropTarget = dragOverRowIdx === idx;
+
+                return (
+                  <div
+                    key={fieldKey}
+                    draggable={!!onReorderFields}
+                    onDragStart={(e) => {
+                      setDraggedRowIdx(idx);
+                      e.dataTransfer.effectAllowed = "move";
+                      e.dataTransfer.setData("text/plain", String(idx));
+                    }}
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = "move";
+                    }}
+                    onDragEnter={() => setDragOverRowIdx(idx)}
+                    onDragEnd={() => {
+                      setDraggedRowIdx(null);
+                      setDragOverRowIdx(null);
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      if (draggedRowIdx !== null && draggedRowIdx !== idx) {
+                        handleReorderRowDimensions(draggedRowIdx, idx);
+                      }
+                      setDraggedRowIdx(null);
+                      setDragOverRowIdx(null);
+                    }}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: "6px",
+                      padding: "4px 8px",
+                      backgroundColor: isDropTarget
+                        ? tokens.colorBrandBackground2
+                        : tokens.colorNeutralBackground1,
+                      border: isDropTarget
+                        ? `1px dashed ${tokens.colorBrandStroke1}`
+                        : `1px solid ${tokens.colorNeutralStroke1}`,
+                      borderRadius: "4px",
+                      fontSize: "12px",
+                      opacity: isDragging ? 0.4 : 1,
+                      cursor: onReorderFields ? "grab" : "default",
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "6px",
+                        minWidth: 0,
+                        flex: 1,
+                      }}
+                    >
+                      {onReorderFields && (
+                        <ReorderRegular
+                          style={{
+                            fontSize: "12px",
+                            color: tokens.colorNeutralForeground4,
+                            flexShrink: 0,
+                          }}
+                        />
+                      )}
+                      <span
+                        style={{
+                          fontWeight: 500,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                        title={def?.label || fieldKey}
+                      >
+                        {def?.label || fieldKey}
+                      </span>
+                    </div>
+
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "4px",
+                        flexShrink: 0,
+                      }}
+                    >
+                      {onTogglePivot && (
+                        <span
+                          title="Move dimension to Columns (Pivot)"
+                          style={{
+                            cursor: "pointer",
+                            fontSize: "10px",
+                            fontWeight: 600,
+                            padding: "1px 5px",
+                            borderRadius: "6px",
+                            backgroundColor: tokens.colorNeutralBackground3,
+                            color: tokens.colorNeutralForeground2,
+                          }}
+                          onClick={() => onTogglePivot(fieldKey)}
+                        >
+                          → Col
+                        </span>
+                      )}
+                      {onToggleSort && (
+                        <span
+                          title={
+                            isAsc
+                              ? "Sorted Ascending. Click for Descending."
+                              : isDesc
+                              ? "Sorted Descending. Click to clear sort."
+                              : "Click to sort Ascending."
+                          }
+                          style={{
+                            cursor: "pointer",
+                            fontSize: "11px",
+                            fontWeight: 700,
+                            padding: "1px 4px",
+                            borderRadius: "4px",
+                            color:
+                              isAsc || isDesc
+                                ? tokens.colorBrandForeground1
+                                : tokens.colorNeutralForeground4,
+                            backgroundColor:
+                              isAsc || isDesc
+                                ? tokens.colorBrandBackground2
+                                : "transparent",
+                          }}
+                          onClick={() => onToggleSort(fieldKey)}
+                        >
+                          {isAsc ? "↑" : isDesc ? "↓" : "↕"}
+                        </span>
+                      )}
+                      <DismissRegular
+                        style={{ cursor: "pointer", fontSize: "12px" }}
+                        title="Remove from Rows"
+                        onClick={() => onToggleField(fieldKey)}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
-      )}
+
+        {/* COLUMNS BUCKET (Measures + Pivoted Dimensions) */}
+        <div
+          style={{
+            border: `1px solid ${tokens.colorNeutralStroke2}`,
+            borderRadius: "6px",
+            backgroundColor: tokens.colorNeutralBackground2,
+            padding: "8px 10px",
+            display: "flex",
+            flexDirection: "column",
+            gap: "6px",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              gap: "4px",
+              flexWrap: "wrap",
+            }}
+          >
+            <Caption1 style={{ fontWeight: 700, fontSize: "12px" }}>
+              Columns ({buckets.columnItems.length})
+            </Caption1>
+            <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+              <Button
+                size="small"
+                appearance={addingToPivots ? "primary" : "subtle"}
+                icon={<AddRegular />}
+                style={{ fontSize: "11px", padding: "2px 6px", minWidth: 0 }}
+                onClick={() => {
+                  setCatalogCategoryFilter("dimension");
+                  setAddingToPivots((prev) => !prev);
+                }}
+                title="When active, checking a dimension in the catalog adds it directly as a Column Pivot"
+              >
+                Pivot Dim
+              </Button>
+              <Button
+                size="small"
+                appearance="subtle"
+                icon={<AddRegular />}
+                style={{ fontSize: "11px", padding: "2px 6px", minWidth: 0 }}
+                onClick={() => {
+                  setCatalogCategoryFilter("measure");
+                  setAddingToPivots(false);
+                }}
+              >
+                Measure
+              </Button>
+            </div>
+          </div>
+
+          {buckets.columnItems.length === 0 ? (
+            <Caption1
+              style={{
+                color: tokens.colorNeutralForeground4,
+                fontStyle: "italic",
+                fontSize: "11px",
+              }}
+            >
+              Select measures or pivot dimensions to populate columns.
+            </Caption1>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+              {buckets.columnItems.map((item, colIdx) => {
+                const isDragging = draggedColIdx === colIdx;
+                const isDropTarget = dragOverColIdx === colIdx;
+
+                if (item.type === "measures") {
+                  return (
+                    <div
+                      key={item.id}
+                      draggable={buckets.columnItems.length > 1}
+                      onDragStart={(e) => {
+                        setDraggedColIdx(colIdx);
+                        e.dataTransfer.effectAllowed = "move";
+                        e.dataTransfer.setData("text/plain", String(colIdx));
+                      }}
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = "move";
+                      }}
+                      onDragEnter={() => setDragOverColIdx(colIdx)}
+                      onDragEnd={() => {
+                        setDraggedColIdx(null);
+                        setDragOverColIdx(null);
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        if (draggedColIdx !== null && draggedColIdx !== colIdx) {
+                          handleReorderColumnBucket(draggedColIdx, colIdx);
+                        }
+                        setDraggedColIdx(null);
+                        setDragOverColIdx(null);
+                      }}
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "4px",
+                        padding: "5px 8px",
+                        backgroundColor: isDropTarget
+                          ? tokens.colorBrandBackground2
+                          : tokens.colorNeutralBackground1,
+                        border: isDropTarget
+                          ? `1px dashed ${tokens.colorBrandStroke1}`
+                          : `1px solid ${tokens.colorNeutralStroke1}`,
+                        borderRadius: "4px",
+                        opacity: isDragging ? 0.4 : 1,
+                        cursor: buckets.columnItems.length > 1 ? "grab" : "default",
+                      }}
+                      title={
+                        buckets.columnItems.length > 1
+                          ? "Drag above or below Pivot Dimensions to switch Measure-first vs Cohort-first column grouping"
+                          : undefined
+                      }
+                    >
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          gap: "6px",
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                          {buckets.columnItems.length > 1 && (
+                            <ReorderRegular
+                              style={{
+                                fontSize: "12px",
+                                color: tokens.colorNeutralForeground4,
+                              }}
+                            />
+                          )}
+                          <Badge size="small" appearance="tint" color="warning">
+                            M
+                          </Badge>
+                          <span style={{ fontWeight: 600, fontSize: "12px" }}>
+                            Measures ({item.measureKeys.length})
+                          </span>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                          {colIdx > 0 && (
+                            <span
+                              title="Move Measures before Pivot Dimension (Group by Measure)"
+                              style={{
+                                cursor: "pointer",
+                                fontSize: "11px",
+                                fontWeight: 700,
+                                padding: "0 4px",
+                              }}
+                              onClick={() => handleReorderColumnBucket(colIdx, colIdx - 1)}
+                            >
+                              ↑
+                            </span>
+                          )}
+                          {colIdx < buckets.columnItems.length - 1 && (
+                            <span
+                              title="Move Measures after Pivot Dimension (Group by Cohort)"
+                              style={{
+                                cursor: "pointer",
+                                fontSize: "11px",
+                                fontWeight: 700,
+                                padding: "0 4px",
+                              }}
+                              onClick={() => handleReorderColumnBucket(colIdx, colIdx + 1)}
+                            >
+                              ↓
+                            </span>
+                          )}
+                          <DismissRegular
+                            style={{ cursor: "pointer", fontSize: "12px" }}
+                            title="Remove all measures"
+                            onClick={() => {
+                              item.measureKeys.forEach((mk) => onToggleField(mk));
+                            }}
+                          />
+                        </div>
+                      </div>
+
+                      {/* Individual Measure Sub-Chips */}
+                      <div
+                        style={{
+                          display: "flex",
+                          flexWrap: "wrap",
+                          gap: "4px",
+                          paddingLeft: buckets.columnItems.length > 1 ? "18px" : "2px",
+                        }}
+                      >
+                        {item.measureKeys.map((mKey) => {
+                          const def = allFields.find((f) => f.name === mKey);
+                          const sortEntry = sorts.find(
+                            (s) => s === mKey || s.startsWith(`${mKey} `)
+                          );
+                          const isAsc = sortEntry === mKey || sortEntry === `${mKey} asc`;
+                          const isDesc = sortEntry === `${mKey} desc`;
+                          return (
+                            <div
+                              key={mKey}
+                              className={styles.selectedChip}
+                              style={{ padding: "1px 6px", fontSize: "11px" }}
+                            >
+                              <span>{def?.label_short || def?.label || mKey}</span>
+                              {onToggleSort && (
+                                <span
+                                  title="Toggle sort direction"
+                                  style={{
+                                    cursor: "pointer",
+                                    fontWeight: 700,
+                                    color:
+                                      isAsc || isDesc
+                                        ? tokens.colorBrandForeground1
+                                        : tokens.colorNeutralForeground4,
+                                  }}
+                                  onClick={() => onToggleSort(mKey)}
+                                >
+                                  {isAsc ? "↑" : isDesc ? "↓" : "↕"}
+                                </span>
+                              )}
+                              <DismissRegular
+                                style={{ cursor: "pointer", fontSize: "10px" }}
+                                onClick={() => onToggleField(mKey)}
+                              />
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                }
+
+                // Pivot Dimension item
+                const fieldKey = item.fieldKey;
+                const def = allFields.find((f) => f.name === fieldKey);
+                const sortEntry = sorts.find(
+                  (s) => s === fieldKey || s.startsWith(`${fieldKey} `)
+                );
+                const isAsc = sortEntry === fieldKey || sortEntry === `${fieldKey} asc`;
+                const isDesc = sortEntry === `${fieldKey} desc`;
+
+                return (
+                  <div
+                    key={item.id}
+                    draggable={buckets.columnItems.length > 1}
+                    onDragStart={(e) => {
+                      setDraggedColIdx(colIdx);
+                      e.dataTransfer.effectAllowed = "move";
+                      e.dataTransfer.setData("text/plain", String(colIdx));
+                    }}
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = "move";
+                    }}
+                    onDragEnter={() => setDragOverColIdx(colIdx)}
+                    onDragEnd={() => {
+                      setDraggedColIdx(null);
+                      setDragOverColIdx(null);
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      if (draggedColIdx !== null && draggedColIdx !== colIdx) {
+                        handleReorderColumnBucket(draggedColIdx, colIdx);
+                      }
+                      setDraggedColIdx(null);
+                      setDragOverColIdx(null);
+                    }}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: "6px",
+                      padding: "4px 8px",
+                      backgroundColor: isDropTarget
+                        ? tokens.colorBrandBackground2
+                        : tokens.colorNeutralBackground1,
+                      border: isDropTarget
+                        ? `1px dashed ${tokens.colorBrandStroke1}`
+                        : `1px solid ${tokens.colorNeutralStroke1}`,
+                      borderRadius: "4px",
+                      fontSize: "12px",
+                      opacity: isDragging ? 0.4 : 1,
+                      cursor: buckets.columnItems.length > 1 ? "grab" : "default",
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "6px",
+                        minWidth: 0,
+                        flex: 1,
+                      }}
+                    >
+                      {buckets.columnItems.length > 1 && (
+                        <ReorderRegular
+                          style={{
+                            fontSize: "12px",
+                            color: tokens.colorNeutralForeground4,
+                            flexShrink: 0,
+                          }}
+                        />
+                      )}
+                      <Badge size="small" appearance="filled" color="brand">
+                        Pivot
+                      </Badge>
+                      <span
+                        style={{
+                          fontWeight: 500,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                        title={def?.label || fieldKey}
+                      >
+                        {def?.label || fieldKey}
+                      </span>
+                    </div>
+
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "4px",
+                        flexShrink: 0,
+                      }}
+                    >
+                      {colIdx > 0 && (
+                        <span
+                          title="Move up in Columns"
+                          style={{
+                            cursor: "pointer",
+                            fontSize: "11px",
+                            fontWeight: 700,
+                            padding: "0 3px",
+                          }}
+                          onClick={() => handleReorderColumnBucket(colIdx, colIdx - 1)}
+                        >
+                          ↑
+                        </span>
+                      )}
+                      {colIdx < buckets.columnItems.length - 1 && (
+                        <span
+                          title="Move down in Columns"
+                          style={{
+                            cursor: "pointer",
+                            fontSize: "11px",
+                            fontWeight: 700,
+                            padding: "0 3px",
+                          }}
+                          onClick={() => handleReorderColumnBucket(colIdx, colIdx + 1)}
+                        >
+                          ↓
+                        </span>
+                      )}
+                      {onTogglePivot && (
+                        <span
+                          title="Move back to Rows"
+                          style={{
+                            cursor: "pointer",
+                            fontSize: "10px",
+                            fontWeight: 600,
+                            padding: "1px 5px",
+                            borderRadius: "6px",
+                            backgroundColor: tokens.colorNeutralBackground3,
+                            color: tokens.colorNeutralForeground2,
+                          }}
+                          onClick={() => onTogglePivot(fieldKey)}
+                        >
+                          ← Row
+                        </span>
+                      )}
+                      {onToggleSort && (
+                        <span
+                          title="Toggle sort direction"
+                          style={{
+                            cursor: "pointer",
+                            fontSize: "11px",
+                            fontWeight: 700,
+                            padding: "1px 4px",
+                            borderRadius: "4px",
+                            color:
+                              isAsc || isDesc
+                                ? tokens.colorBrandForeground1
+                                : tokens.colorNeutralForeground4,
+                            backgroundColor:
+                              isAsc || isDesc
+                                ? tokens.colorBrandBackground2
+                                : "transparent",
+                          }}
+                          onClick={() => onToggleSort(fieldKey)}
+                        >
+                          {isAsc ? "↑" : isDesc ? "↓" : "↕"}
+                        </span>
+                      )}
+                      <DismissRegular
+                        style={{ cursor: "pointer", fontSize: "12px" }}
+                        title="Remove dimension"
+                        onClick={() => onToggleField(fieldKey)}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {pivots.length > 0 && buckets.rowDimensionKeys.length > 0 && onSetPivots && (
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "2px" }}>
+              <Button
+                size="small"
+                appearance="outline"
+                style={{ fontSize: "11px", padding: "2px 8px" }}
+                title="Swap row dimensions and column pivot dimensions"
+                onClick={() => {
+                  onSetPivots([...buckets.rowDimensionKeys]);
+                }}
+              >
+                ⇄ Swap Rows &amp; Columns
+              </Button>
+            </div>
+          )}
+        </div>
+
+        {/* FILTER BUCKET SLOT */}
+        {filterSlot && (
+          <div
+            style={{
+              border: `1px solid ${tokens.colorNeutralStroke2}`,
+              borderRadius: "6px",
+              backgroundColor: tokens.colorNeutralBackground2,
+              padding: "8px 10px",
+            }}
+          >
+            {filterSlot}
+          </div>
+        )}
+      </div>
+
+      {/* Field Catalog Search & Filter Pills */}
+      <div style={{ display: "flex", flexDirection: "column", gap: "6px", marginTop: "2px" }}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+          }}
+        >
+          <Caption1 style={{ fontWeight: 700, fontSize: "12px" }}>
+            Field Catalog {addingToPivots ? "(Adding to Column Pivots)" : ""}
+          </Caption1>
+          {selectedFields.length > 0 && (
+            <Button size="small" appearance="subtle" onClick={onClearSelected}>
+              Clear All ({selectedFields.length})
+            </Button>
+          )}
+        </div>
+
+        <Input
+          size="small"
+          contentBefore={<SearchRegular />}
+          placeholder="Search dimensions & measures..."
+          value={searchTerm}
+          onChange={(_, data) => setSearchTerm(data.value)}
+        />
+
+        <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
+          <Button
+            size="small"
+            appearance={catalogCategoryFilter === "all" ? "primary" : "outline"}
+            style={{ fontSize: "11px", padding: "2px 8px", minWidth: 0 }}
+            onClick={() => {
+              setCatalogCategoryFilter("all");
+              setAddingToPivots(false);
+            }}
+          >
+            All ({allFields.length})
+          </Button>
+          <Button
+            size="small"
+            appearance={catalogCategoryFilter === "dimension" ? "primary" : "outline"}
+            style={{ fontSize: "11px", padding: "2px 8px", minWidth: 0 }}
+            onClick={() => setCatalogCategoryFilter("dimension")}
+          >
+            Dimensions ({dimensions.length})
+          </Button>
+          <Button
+            size="small"
+            appearance={catalogCategoryFilter === "measure" ? "primary" : "outline"}
+            style={{ fontSize: "11px", padding: "2px 8px", minWidth: 0 }}
+            onClick={() => {
+              setCatalogCategoryFilter("measure");
+              setAddingToPivots(false);
+            }}
+          >
+            Measures ({measures.length})
+          </Button>
+        </div>
+      </div>
 
       {/* Grouped Tree Accordion (Views) */}
       <div style={{ maxHeight: "300px", overflowY: "auto" }}>
