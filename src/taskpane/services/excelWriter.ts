@@ -72,6 +72,26 @@ export interface WriteOptions {
   showGroupSubtotals?: boolean;
   treeNodes?: HierarchyTreeNodeMeta[];
   rowLevels?: number[];
+  showSourceBanner?: boolean;
+  sourceBannerTitle?: string;
+  pivotDimensionLabels?: string[];
+}
+
+export function getEffectiveHeaderRowCount(options?: WriteOptions): {
+  bannerRowCount: number;
+  tableHeaderRowCount: number;
+  totalHeaderRowCount: number;
+} {
+  const bannerRowCount = options?.showSourceBanner ? 1 : 0;
+  const useMultiRowHeader = Boolean(
+    options?.useMultiRowCrosstabHeader && options?.pivots && options.pivots.length > 0
+  );
+  const tableHeaderRowCount = useMultiRowHeader ? (options?.pivots?.length || 1) + 1 : 1;
+  return {
+    bannerRowCount,
+    tableHeaderRowCount,
+    totalHeaderRowCount: bannerRowCount + tableHeaderRowCount,
+  };
 }
 
 /**
@@ -509,7 +529,8 @@ export function expandPivotedColumns(
 export function buildCrosstabHeaderMatrix(
   expandedColumns: ColumnDefinition[],
   pivots?: string[],
-  trailingHeaders: string[] = []
+  trailingHeaders: string[] = [],
+  pivotDimensionLabels?: string[]
 ): CrosstabHeaderMatrix {
   const pivotDepth = Math.max(
     pivots?.length || 0,
@@ -523,6 +544,11 @@ export function buildCrosstabHeaderMatrix(
     };
   }
 
+  const firstPivotColIdx = expandedColumns.findIndex(
+    (c) => Boolean(c.pivotValues && c.pivotValues.length > 0) || Boolean(c.isRowTotal)
+  );
+  const nonPivotColCount = firstPivotColIdx >= 0 ? firstPivotColIdx : 0;
+
   const totalCols = expandedColumns.length + trailingHeaders.length;
   const headerRows: string[][] = [];
 
@@ -534,6 +560,12 @@ export function buildCrosstabHeaderMatrix(
         rowCells.push(r === 0 ? "Row Total" : "");
       } else if (col.pivotValues && col.pivotValues.length > 0) {
         rowCells.push(col.pivotValues[r] ?? "");
+      } else if (
+        c === nonPivotColCount - 1 &&
+        pivotDimensionLabels &&
+        pivotDimensionLabels[r]
+      ) {
+        rowCells.push(pivotDimensionLabels[r]);
       } else {
         rowCells.push("");
       }
@@ -559,10 +591,10 @@ export function buildCrosstabHeaderMatrix(
   }
   headerRows.push(bottomRow);
 
-  // Compute horizontal merges on each pivot cohort row (0 .. pivotDepth - 1)
+  // Compute horizontal merges on each pivot cohort row (0 .. pivotDepth - 1) across pivoted columns
   const merges: CrosstabHeaderMerge[] = [];
   for (let r = 0; r < pivotDepth; r++) {
-    let runStart = 0;
+    let runStart = Math.max(0, nonPivotColCount);
     while (runStart < totalCols) {
       const val = headerRows[r][runStart];
       if (!val) {
@@ -1100,7 +1132,12 @@ export async function writeLookerDataToWorksheet(
   const useMultiRowHeader = Boolean(
     options.useMultiRowCrosstabHeader && options.pivots && options.pivots.length > 0
   );
-  const headerRowCount = useMultiRowHeader ? (options.pivots?.length || 1) + 1 : 1;
+  const {
+    bannerRowCount,
+    tableHeaderRowCount,
+    totalHeaderRowCount: headerRowCount,
+  } = getEffectiveHeaderRowCount(options);
+  const tableHeaderStartRow = startRow + bannerRowCount;
   let writtenSheetId = "";
 
   await Excel.run(async (context) => {
@@ -1227,12 +1264,17 @@ export async function writeLookerDataToWorksheet(
 
             for (const { tbl, rng } of tableRanges) {
               const matchesById = options.tableId && tbl.name === options.tableId;
-              const matchesByAnchor = rng.rowIndex === startRow && rng.columnIndex === startCol;
+              const matchesByAnchor =
+                (rng.rowIndex === startRow || rng.rowIndex === startRow + 1) &&
+                rng.columnIndex === startCol;
 
               if (matchesById || matchesByAnchor) {
                 existingTable = tbl;
                 savedTableName = tbl.name;
-                prevTotalRows = Math.max(prevTotalRows, rng.rowCount);
+                prevTotalRows = Math.max(
+                  prevTotalRows,
+                  rng.rowCount + Math.max(0, rng.rowIndex - startRow)
+                );
                 prevTotalCols = Math.max(prevTotalCols, rng.columnCount);
               } else {
                 // Protect other Excel Tables on the same worksheet from being overwritten or cleared
@@ -1435,7 +1477,12 @@ export async function writeLookerDataToWorksheet(
         try {
           const shrinkRows = Math.min(prevTotalRows, listObjectBodyRows + 1);
           const shrinkCols = Math.min(prevTotalCols, protectedCols);
-          const shrinkRange = sheet.getRangeByIndexes(startRow, startCol, shrinkRows, shrinkCols);
+          const shrinkRange = sheet.getRangeByIndexes(
+            tableHeaderStartRow,
+            startCol,
+            shrinkRows,
+            shrinkCols
+          );
           existingTable.resize(shrinkRange);
           await context.sync();
         } catch (e) {
@@ -1450,7 +1497,7 @@ export async function writeLookerDataToWorksheet(
           const prevHeaderArea = sheet.getRangeByIndexes(
             startRow,
             startCol,
-            Math.max(headerRowCount, 4),
+            Math.max(headerRowCount, 5),
             Math.max(protectedCols, prevTotalCols)
           );
           prevHeaderArea.unmerge();
@@ -1515,7 +1562,29 @@ export async function writeLookerDataToWorksheet(
         }
       }
 
-      // 3. Write Header (either 1-row flat header or Multi-Row Merged Crosstab Header) at (startRow, startCol)
+      // 3. Write Source Information Banner (if enabled) and Table / Crosstab Header
+      if (bannerRowCount > 0) {
+        const bannerText =
+          options.sourceBannerTitle || options.sheetName || "Looker Data";
+        const bannerCells = Array.from({ length: protectedCols }, (_, idx) =>
+          idx === 0 ? bannerText : ""
+        );
+        const bannerRange = sheet.getRangeByIndexes(startRow, startCol, 1, protectedCols);
+        bannerRange.values = [bannerCells];
+        bannerRange.format.fill.color = "#E8EAED";
+        bannerRange.format.font.color = "#3C4043";
+        bannerRange.format.font.size = 13;
+        bannerRange.format.font.bold = false;
+        bannerRange.format.font.italic = false;
+        bannerRange.format.rowHeight = 24;
+        bannerRange.format.verticalAlignment = Excel.VerticalAlignment.center;
+        const bannerBottomBorder = bannerRange.format.borders.getItem(
+          Excel.BorderIndex.edgeBottom
+        );
+        bannerBottomBorder.style = Excel.BorderLineStyle.continuous;
+        bannerBottomBorder.color = "#BDC1C6";
+      }
+
       const seenHeaders = new Map<string, number>();
       const deduplicateHeader = (raw: string): string => {
         const base = (raw || "Column").trim();
@@ -1535,20 +1604,45 @@ export async function writeLookerDataToWorksheet(
         const crosstabHeader = buildCrosstabHeaderMatrix(
           expandedColumns,
           options.pivots,
-          uniqueFormulaHeaders
+          uniqueFormulaHeaders,
+          options.pivotDimensionLabels
         );
         const hRows = crosstabHeader.headerRows.length;
-        const headerRange = sheet.getRangeByIndexes(startRow, startCol, hRows, protectedCols);
+        const headerRange = sheet.getRangeByIndexes(
+          tableHeaderStartRow,
+          startCol,
+          hRows,
+          protectedCols
+        );
         headerRange.values = crosstabHeader.headerRows;
 
-        const lookerTopHeader = sheet.getRangeByIndexes(startRow, startCol, hRows - 1, colCount);
+        const lookerTopHeader = sheet.getRangeByIndexes(
+          tableHeaderStartRow,
+          startCol,
+          hRows - 1,
+          colCount
+        );
         lookerTopHeader.format.font.bold = true;
         lookerTopHeader.format.fill.color = "#1D5288";
         lookerTopHeader.format.font.color = "#FFFFFF";
         lookerTopHeader.format.horizontalAlignment = Excel.HorizontalAlignment.center;
 
+        // Right-align top-left corner cells holding the pivoted dimension names (e.g. Version, Time)
+        const firstPivotColIdx = expandedColumns.findIndex(
+          (c) => Boolean(c.pivotValues && c.pivotValues.length > 0) || Boolean(c.isRowTotal)
+        );
+        if (firstPivotColIdx > 0 && hRows > 1) {
+          const cornerHeader = sheet.getRangeByIndexes(
+            tableHeaderStartRow,
+            startCol,
+            hRows - 1,
+            firstPivotColIdx
+          );
+          cornerHeader.format.horizontalAlignment = Excel.HorizontalAlignment.right;
+        }
+
         const lookerBottomHeader = sheet.getRangeByIndexes(
-          startRow + hRows - 1,
+          tableHeaderStartRow + hRows - 1,
           startCol,
           1,
           colCount
@@ -1559,7 +1653,7 @@ export async function writeLookerDataToWorksheet(
 
         for (const m of crosstabHeader.merges) {
           const mergeRng = sheet.getRangeByIndexes(
-            startRow + m.rowOffset,
+            tableHeaderStartRow + m.rowOffset,
             startCol + m.colOffset,
             m.rowCount,
             m.colCount
@@ -1568,10 +1662,20 @@ export async function writeLookerDataToWorksheet(
         }
       } else {
         const allHeaderLabels = [...uniqueHeaderLabels, ...uniqueFormulaHeaders];
-        const headerRange = sheet.getRangeByIndexes(startRow, startCol, 1, protectedCols);
+        const headerRange = sheet.getRangeByIndexes(
+          tableHeaderStartRow,
+          startCol,
+          1,
+          protectedCols
+        );
         headerRange.values = [allHeaderLabels];
         if (!options.preserveUserFormatting) {
-          const lookerHeaderRange = sheet.getRangeByIndexes(startRow, startCol, 1, colCount);
+          const lookerHeaderRange = sheet.getRangeByIndexes(
+            tableHeaderStartRow,
+            startCol,
+            1,
+            colCount
+          );
           lookerHeaderRange.format.font.bold = true;
           lookerHeaderRange.format.fill.color = "#1D5288"; // Looker Brand Blue
           lookerHeaderRange.format.font.color = "#FFFFFF";
@@ -1622,11 +1726,11 @@ export async function writeLookerDataToWorksheet(
         await new Promise((r) => setTimeout(r, 0));
       }
 
-      // 5. Resize or Create Native Excel Table (ListObject) anchored at (startRow, startCol)
+      // 5. Resize or Create Native Excel Table (ListObject) anchored at (tableHeaderStartRow, startCol)
       try {
         if (options.useExcelTable && !hasSubtotals && !useMultiRowHeader && listObjectBodyRows > 0) {
           const fullRange = sheet.getRangeByIndexes(
-            startRow,
+            tableHeaderStartRow,
             startCol,
             listObjectBodyRows + 1,
             protectedCols
@@ -1945,10 +2049,7 @@ export async function toggleWorksheetTreeNode(
     return null;
   }
   const { startRow, startCol } = parseCellAddress(options.anchorCell);
-  const headerRowCount =
-    options.useMultiRowCrosstabHeader && options.pivots && options.pivots.length > 0
-      ? options.pivots.length + 1
-      : 1;
+  const { totalHeaderRowCount: headerRowCount } = getEffectiveHeaderRowCount(options);
   if (clickedSheetCol0Based !== startCol || clickedSheetRow0Based < startRow + headerRowCount) {
     return null;
   }
@@ -1991,10 +2092,7 @@ export async function applyWorksheetTreeDisplayLevel(
   if (!options.enableRowGroups || !options.treeNodes || options.treeNodes.length === 0) {
     return null;
   }
-  const headerRowCount =
-    options.useMultiRowCrosstabHeader && options.pivots && options.pivots.length > 0
-      ? options.pivots.length + 1
-      : 1;
+  const { totalHeaderRowCount: headerRowCount } = getEffectiveHeaderRowCount(options);
   const maxVisibleLevel = getMaxVisibleLevel(displayLevel);
   const updatedNodes = options.treeNodes.map((n) => ({
     ...n,
@@ -2014,4 +2112,40 @@ export async function applyWorksheetTreeDisplayLevel(
   );
 
   return updatedNodes;
+}
+
+/**
+ * Updates the in-sheet Source Information Banner row to display `Loading... <Title>` during
+ * query refresh, or restores `<Title>` upon completion (matching SAC's in-sheet loading banner).
+ */
+export async function setWorksheetBannerLoadingState(
+  targetSheetId: string | undefined,
+  options: WriteOptions,
+  isLoading: boolean
+): Promise<void> {
+  if (!options.showSourceBanner) {
+    return;
+  }
+  const { startRow, startCol } = parseCellAddress(options.anchorCell);
+  const baseTitle = options.sourceBannerTitle || options.sheetName || "Looker Data";
+  const displayText = isLoading ? `Loading... ${baseTitle}` : baseTitle;
+
+  try {
+    await Excel.run(async (context) => {
+      const sheet = targetSheetId
+        ? context.workbook.worksheets.getItemOrNullObject(targetSheetId)
+        : context.workbook.worksheets.getActiveWorksheet();
+      sheet.load(["isNullObject"]);
+      await context.sync();
+      if (sheet.isNullObject) return;
+
+      const cell = sheet.getRangeByIndexes(startRow, startCol, 1, 1);
+      cell.values = [[displayText]];
+      cell.format.font.italic = isLoading;
+      cell.format.font.color = isLoading ? "#5F6368" : "#3C4043";
+      await context.sync();
+    });
+  } catch {
+    // Non-fatal if Excel runtime is unavailable
+  }
 }

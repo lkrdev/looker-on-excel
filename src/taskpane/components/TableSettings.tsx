@@ -184,6 +184,35 @@ export const TableSettings: React.FC<TableSettingsProps> = ({
                 )}
               </div>
 
+              {/* Source Information Banner Row */}
+              <div className={styles.row}>
+                <Checkbox
+                  checked={options.showSourceBanner ?? true}
+                  onChange={(_, data) => onOptionsChange({ showSourceBanner: !!data.checked })}
+                  label={
+                    <div>
+                      <span style={{ fontSize: "12px", fontWeight: 600 }}>
+                        Show Source Information Banner Row
+                      </span>
+                      <Caption1 style={{ color: tokens.colorNeutralForeground3, display: "block" }}>
+                        Renders a header row above the table displaying the Explore / Look source name.
+                      </Caption1>
+                    </div>
+                  }
+                />
+                {(options.showSourceBanner ?? true) && (
+                  <div style={{ marginLeft: "28px", marginTop: "2px", display: "flex", flexDirection: "column", gap: "2px" }}>
+                    <Label size="small">Banner Title Override (Optional)</Label>
+                    <Input
+                      size="small"
+                      placeholder="Leave blank to use Explore / Look title"
+                      value={options.sourceBannerTitle || ""}
+                      onChange={(_, data) => onOptionsChange({ sourceBannerTitle: data.value })}
+                    />
+                  </div>
+                )}
+              </div>
+
               {/* Table Style */}
               <div className={styles.row}>
                 <Checkbox
