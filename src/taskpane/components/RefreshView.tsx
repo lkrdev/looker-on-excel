@@ -85,6 +85,7 @@ interface RefreshViewProps {
   onAddTableToSheet?: () => void;
   onApplyDrillPayload?: (updatedPayload: QueryPayload, updatedOptions?: Partial<WriteOptions>) => void;
   onChangeDisplayLevel?: (displayLevel: RowGroupDisplayLevel) => void;
+  onChangeColumnDisplayLevel?: (displayLevel: RowGroupDisplayLevel) => void;
   onRefresh: () => void;
   onCancel?: () => void;
   onEdit: () => void;
@@ -102,6 +103,7 @@ export const RefreshView: React.FC<RefreshViewProps> = ({
   onAddTableToSheet,
   onApplyDrillPayload,
   onChangeDisplayLevel,
+  onChangeColumnDisplayLevel,
   onRefresh,
   onCancel,
   onEdit,
@@ -139,6 +141,14 @@ export const RefreshView: React.FC<RefreshViewProps> = ({
   const isRowGroupsEnabled = Boolean(config.options?.enableRowGroups && nonPivotDims.length >= 2);
   const deepestDim = nonPivotDims.length > 0 ? nonPivotDims[nonPivotDims.length - 1] : null;
   const deepestCtx = deepestDim ? getFieldHierarchyContext(deepestDim, hierarchyLadders) : null;
+
+  const isColumnGroupsEnabled = Boolean(
+    config.options?.enableColumnGroups && activePivots.length >= 2
+  );
+  const deepestPivotDim = activePivots.length > 0 ? activePivots[activePivots.length - 1] : null;
+  const deepestPivotCtx = deepestPivotDim
+    ? getFieldHierarchyContext(deepestPivotDim, hierarchyLadders)
+    : null;
 
   return (
     <div className={styles.container}>
@@ -336,6 +346,133 @@ export const RefreshView: React.FC<RefreshViewProps> = ({
                     {dimByName.get(deepestDim!)?.label_short ||
                       dimByName.get(deepestDim!)?.label ||
                       deepestDim}
+                  </Button>
+                )}
+              </div>
+            )}
+          </div>
+        </Card>
+      )}
+
+      {(activePivots.length >= 2 || deepestPivotCtx) && onApplyDrillPayload && (
+        <Card className={styles.card}>
+          <div style={{ padding: "10px 12px", display: "flex", flexDirection: "column", gap: "8px" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div style={{ display: "flex", flexDirection: "column" }}>
+                <Caption1 style={{ fontWeight: 600 }}>Column Hierarchy / Crosstab Drill</Caption1>
+                <Caption1 style={{ color: tokens.colorNeutralForeground3, fontSize: "11px" }}>
+                  {activePivots
+                    .map((p) => dimByName.get(p)?.label_short || dimByName.get(p)?.label || p)
+                    .join(" ▸ ")}
+                </Caption1>
+              </div>
+              {activePivots.length >= 2 && (
+                <Switch
+                  checked={isColumnGroupsEnabled}
+                  disabled={isRefreshing}
+                  onChange={(_, data) => {
+                    onApplyDrillPayload(config.queryPayload, {
+                      enableColumnGroups: data.checked,
+                      useMultiRowCrosstabHeader: data.checked
+                        ? true
+                        : config.options?.useMultiRowCrosstabHeader,
+                      defaultColumnDisplayLevel:
+                        config.options?.defaultColumnDisplayLevel || "all_expanded",
+                    });
+                  }}
+                />
+              )}
+            </div>
+
+            {isColumnGroupsEnabled && (
+              <>
+                <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                  <Caption1 style={{ fontWeight: 600, fontSize: "11px" }}>
+                    Column Display Level (In-Sheet Expand / Collapse)
+                  </Caption1>
+                  <Select
+                    size="small"
+                    value={config.options?.defaultColumnDisplayLevel || "all_expanded"}
+                    onChange={(_, data) => {
+                      const nextLevel = data.value as RowGroupDisplayLevel;
+                      if (onChangeColumnDisplayLevel) {
+                        onChangeColumnDisplayLevel(nextLevel);
+                      }
+                    }}
+                  >
+                    <option value="all_collapsed">All Collapsed</option>
+                    <option value="level_1">Level 1</option>
+                    <option value="level_2">Level 2</option>
+                    <option value="all_expanded">All Expanded</option>
+                  </Select>
+                </div>
+                <Caption1 style={{ color: tokens.colorNeutralForeground3, fontSize: "11px" }}>
+                  Tip: Click any <strong>▸</strong> or <strong>▾</strong> cohort header cell in the
+                  crosstab header rows on the worksheet to expand or collapse its child columns
+                  in-place.
+                </Caption1>
+              </>
+            )}
+
+            {deepestPivotCtx && (
+              <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", paddingTop: "2px" }}>
+                {deepestPivotCtx.childField &&
+                  !activePivots.includes(deepestPivotCtx.childField) && (
+                    <Button
+                      size="small"
+                      appearance="outline"
+                      disabled={isRefreshing}
+                      onClick={() => {
+                        const childKey = deepestPivotCtx.childField!;
+                        const nextFields = activeTableFields.includes(childKey)
+                          ? activeTableFields
+                          : [...activeTableFields, childKey];
+                        const nextPivots = [...activePivots, childKey];
+                        onApplyDrillPayload(
+                          {
+                            ...config.queryPayload,
+                            fields: nextFields,
+                            pivots: nextPivots,
+                          },
+                          {
+                            pivots: nextPivots,
+                            enableColumnGroups: true,
+                            useMultiRowCrosstabHeader: true,
+                          }
+                        );
+                      }}
+                    >
+                      + Add Column Level:{" "}
+                      {dimByName.get(deepestPivotCtx.childField)?.label_short ||
+                        dimByName.get(deepestPivotCtx.childField)?.label ||
+                        deepestPivotCtx.childField}
+                    </Button>
+                  )}
+                {activePivots.length >= 2 && deepestPivotCtx.parentField && (
+                  <Button
+                    size="small"
+                    appearance="subtle"
+                    disabled={isRefreshing}
+                    onClick={() => {
+                      const nextPivots = activePivots.slice(0, -1);
+                      const nextFields = activeTableFields.filter((f) => f !== deepestPivotDim);
+                      onApplyDrillPayload(
+                        {
+                          ...config.queryPayload,
+                          fields: nextFields,
+                          pivots: nextPivots,
+                        },
+                        {
+                          pivots: nextPivots,
+                          enableColumnGroups: nextPivots.length >= 2,
+                        }
+                      );
+                    }}
+                  >
+                    - Remove Column Level:{" "}
+                    {dimByName.get(deepestPivotDim!)?.label_short ||
+                      dimByName.get(deepestPivotDim!)?.label ||
+                      deepestPivotDim}
                   </Button>
                 )}
               </div>

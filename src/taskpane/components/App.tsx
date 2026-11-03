@@ -48,6 +48,8 @@ import {
   setWorksheetBannerLoadingState,
   toggleWorksheetTreeNode,
   applyWorksheetTreeDisplayLevel,
+  toggleWorksheetColumnTreeNode,
+  applyWorksheetColumnDisplayLevel,
   ColumnDefinition,
   WriteOptions,
   RowGroupDisplayLevel,
@@ -214,6 +216,59 @@ export const App: React.FC = () => {
           }
         } catch (err) {
           console.warn("Tree node toggle skipped:", err);
+        } finally {
+          togglingTreeNodeRef.current = false;
+        }
+      }
+    }
+
+    // In-sheet interactive expand/collapse when user clicks a `▸` / `▾` parent cohort cell in Crosstab Header rows
+    if (
+      !forceViewSync &&
+      !activeChanged &&
+      !togglingTreeNodeRef.current &&
+      selectedCellAddress &&
+      config?.options?.enableColumnGroups &&
+      config?.options?.columnTreeNodes &&
+      config.options.columnTreeNodes.length > 0
+    ) {
+      const { startRow: selRow, startCol: selCol } = parseCellAddress(selectedCellAddress);
+      const { startRow: tblRow, startCol: tblCol } = parseCellAddress(
+        config.anchorCell || config.options.anchorCell || "A1"
+      );
+      const { bannerRowCount, totalHeaderRowCount } = getEffectiveHeaderRowCount(config.options);
+      if (
+        selCol >= tblCol &&
+        selRow >= tblRow + bannerRowCount &&
+        selRow < tblRow + totalHeaderRowCount
+      ) {
+        try {
+          togglingTreeNodeRef.current = true;
+          const updatedColNodes = await toggleWorksheetColumnTreeNode(
+            resolvedSourceId || activeSheetId || undefined,
+            config.options,
+            config.rowCount,
+            selRow,
+            selCol
+          );
+          if (updatedColNodes) {
+            const updatedCfg: StoredSheetConfig = {
+              ...config,
+              options: {
+                ...config.options,
+                columnTreeNodes: updatedColNodes,
+              },
+            };
+            const nextTables = await saveSheetMetadata(
+              updatedCfg,
+              resolvedSourceId || activeSheetId || undefined
+            );
+            setAllSheetTables(nextTables);
+            setSheetConfig(updatedCfg);
+            return;
+          }
+        } catch (err) {
+          console.warn("Column tree node toggle skipped:", err);
         } finally {
           togglingTreeNodeRef.current = false;
         }
@@ -690,7 +745,9 @@ export const App: React.FC = () => {
         pivots.length > 0 ? pivots : undefined,
         Boolean(tableOptions.includeRowTotals && pivots.length > 0),
         bundle.pivotsMeta,
-        tableOptions.pivotGroupMode || "measure_first"
+        tableOptions.pivotGroupMode || "measure_first",
+        Boolean(tableOptions.enableColumnGroups),
+        tableOptions.defaultColumnDisplayLevel || "all_expanded"
       ).expandedColumns.length;
 
       const targetSheetId =
@@ -911,7 +968,9 @@ export const App: React.FC = () => {
         activePivots,
         Boolean(effectivePayload.row_total),
         bundle.pivotsMeta,
-        sheetConfig.options?.pivotGroupMode || "measure_first"
+        mergedOptions.pivotGroupMode || "measure_first",
+        Boolean(mergedOptions.enableColumnGroups),
+        mergedOptions.defaultColumnDisplayLevel || "all_expanded"
       ).expandedColumns.length;
 
       const effectiveAnchor = (
@@ -1023,7 +1082,9 @@ export const App: React.FC = () => {
           sPivots,
           Boolean(s.config.queryPayload.row_total),
           bundle.pivotsMeta,
-          s.config.options?.pivotGroupMode || "measure_first"
+          s.config.options?.pivotGroupMode || "measure_first",
+          Boolean(s.config.options?.enableColumnGroups),
+          s.config.options?.defaultColumnDisplayLevel || "all_expanded"
         ).expandedColumns.length;
 
         const effectiveAnchor = (
@@ -1223,7 +1284,9 @@ export const App: React.FC = () => {
         orderedPayload.pivots || undefined,
         Boolean(orderedPayload.row_total),
         bundle.pivotsMeta,
-        tableOptions.pivotGroupMode || "measure_first"
+        tableOptions.pivotGroupMode || "measure_first",
+        Boolean(tableOptions.enableColumnGroups),
+        tableOptions.defaultColumnDisplayLevel || "all_expanded"
       ).expandedColumns.length;
 
       const effectiveDest = forceNewSheet ? "new" : destination;
@@ -1402,6 +1465,30 @@ export const App: React.FC = () => {
                   ...sheetConfig.options,
                   defaultDisplayLevel: nextLevel,
                   treeNodes: updatedNodes,
+                },
+              };
+              const nextTables = await saveSheetMetadata(
+                updatedCfg,
+                sourceSheetId || undefined
+              );
+              setAllSheetTables(nextTables);
+              setSheetConfig(updatedCfg);
+            }
+          }}
+          onChangeColumnDisplayLevel={async (nextLevel: RowGroupDisplayLevel) => {
+            const updatedColNodes = await applyWorksheetColumnDisplayLevel(
+              sourceSheetId || undefined,
+              sheetConfig.options,
+              sheetConfig.rowCount,
+              nextLevel
+            );
+            if (updatedColNodes) {
+              const updatedCfg: StoredSheetConfig = {
+                ...sheetConfig,
+                options: {
+                  ...sheetConfig.options,
+                  defaultColumnDisplayLevel: nextLevel,
+                  columnTreeNodes: updatedColNodes,
                 },
               };
               const nextTables = await saveSheetMetadata(

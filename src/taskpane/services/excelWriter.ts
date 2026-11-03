@@ -13,6 +13,9 @@ export interface ColumnDefinition {
   measureLabel?: string;
   pivotKey?: string;
   pivotValues?: string[];
+  isColumnGroupSummary?: boolean;
+  columnGroupNodeId?: string;
+  columnGroupHeaderRowOffset?: number;
 }
 
 export interface BoundingBox {
@@ -37,6 +40,18 @@ export interface HierarchyTreeNodeMeta {
   descendantStartOffset: number;
   descendantEndOffset: number;
   directChildOffsets: number[];
+  isExpanded: boolean;
+}
+
+export interface ColumnTreeNodeMeta {
+  id: string;
+  label: string;
+  level: number;
+  headerRowOffset: number;
+  summaryColOffset: number;
+  summaryColCount: number;
+  childColStartOffset: number;
+  childColEndOffset: number;
   isExpanded: boolean;
 }
 
@@ -75,6 +90,9 @@ export interface WriteOptions {
   showSourceBanner?: boolean;
   sourceBannerTitle?: string;
   pivotDimensionLabels?: string[];
+  enableColumnGroups?: boolean;
+  defaultColumnDisplayLevel?: RowGroupDisplayLevel;
+  columnTreeNodes?: ColumnTreeNodeMeta[];
 }
 
 export function getEffectiveHeaderRowCount(options?: WriteOptions): {
@@ -305,7 +323,8 @@ function readNestedPath(obj: any, path: string[]): any {
 /**
  * Detects nested pivot structures in Looker JSON / json_detail query results and expands them
  * into tabular Crosstab columns (including multi-dimension pivots, cohort vs. measure grouping,
- * and Looker-computed Row Totals) with appropriate labels and number formatting.
+ * collapsible parent cohort summary columns, and Looker-computed Row Totals) with appropriate
+ * labels and number formatting.
  */
 export function expandPivotedColumns(
   columns: ColumnDefinition[],
@@ -313,15 +332,19 @@ export function expandPivotedColumns(
   pivots?: string[],
   includeRowTotals?: boolean,
   pivotsMeta?: PivotDescriptor[] | null,
-  pivotGroupMode: PivotGroupMode = "measure_first"
+  pivotGroupMode: PivotGroupMode = "measure_first",
+  enableColumnGroups: boolean = false,
+  defaultColumnDisplayLevel: RowGroupDisplayLevel = "all_expanded"
 ): {
   expandedColumns: ColumnDefinition[];
   getValue: (row: Record<string, any>, col: ColumnDefinition) => any;
+  columnTreeNodes: ColumnTreeNodeMeta[];
 } {
   if (dataRows.length === 0) {
     return {
       expandedColumns: columns,
       getValue: (row, col) => row[col.fieldKey],
+      columnTreeNodes: [],
     };
   }
 
@@ -351,12 +374,19 @@ export function expandPivotedColumns(
         }
         return val;
       },
+      columnTreeNodes: [],
     };
   }
 
   const pivotAccessorMap = new Map<
     string,
-    { measureKey: string; path: string[]; isRowTotal?: boolean }
+    {
+      measureKey: string;
+      path: string[];
+      isRowTotal?: boolean;
+      summaryChildPaths?: string[][];
+      isAverageMeasure?: boolean;
+    }
   >();
 
   interface CohortInfo {
@@ -437,6 +467,21 @@ export function expandPivotedColumns(
   });
 
   const expandedColumns: ColumnDefinition[] = [...nonPivotedColumns];
+  const columnTreeNodes: ColumnTreeNodeMeta[] = [];
+
+  const pivotDepth = Math.max(
+    pivots?.length || 0,
+    globalCohortOrder.reduce((maxD, c) => Math.max(maxD, c.pivotValues.length), 0)
+  );
+
+  const isRateOrAvgMeasure = (col: ColumnDefinition): boolean => {
+    const t = (col.type || "").toLowerCase();
+    return (
+      t.includes("average") ||
+      t.includes("percent") ||
+      Boolean(col.excelFormat && col.excelFormat.includes("%"))
+    );
+  };
 
   const createPivotCol = (col: ColumnDefinition, cohort: CohortInfo): ColumnDefinition => {
     const key = `__pivot__:${col.fieldKey}:::${cohort.pivotKey}`;
@@ -455,6 +500,60 @@ export function expandPivotedColumns(
       measureLabel: col.label,
       pivotKey: cohort.pivotKey,
       pivotValues: cohort.pivotValues,
+    };
+  };
+
+  const createGroupSummaryCol = (
+    col: ColumnDefinition,
+    nodeId: string,
+    headerRowOffset: number,
+    groupLabel: string,
+    isExpanded: boolean,
+    parentValues: string[],
+    childCohorts: CohortInfo[]
+  ): ColumnDefinition => {
+    const key = `__pivot_col_summary__:${col.fieldKey}:::${nodeId}`;
+    const prefix = isExpanded ? "▾" : "▸";
+    const summaryPivotValues: string[] = [];
+    for (let r = 0; r < pivotDepth; r++) {
+      if (r < headerRowOffset) {
+        summaryPivotValues.push(parentValues[r] ?? "");
+      } else if (r === headerRowOffset) {
+        summaryPivotValues.push(`${prefix} ${groupLabel}`);
+      } else {
+        summaryPivotValues.push("");
+      }
+    }
+
+    const mCohorts = cohortsByMeasure.get(col.fieldKey);
+    const summaryChildPaths = childCohorts.map(
+      (c) => (mCohorts?.get(c.pivotKey) || c).path
+    );
+
+    pivotAccessorMap.set(key, {
+      measureKey: col.fieldKey,
+      path: [],
+      summaryChildPaths,
+      isAverageMeasure: isRateOrAvgMeasure(col),
+    });
+
+    const displayPrefix = [...parentValues.slice(0, headerRowOffset), `${prefix} ${groupLabel}`]
+      .filter(Boolean)
+      .join(" · ");
+
+    return {
+      fieldKey: key,
+      label: `${col.label} (${displayPrefix})`,
+      type: col.type,
+      excelFormat: col.excelFormat,
+      category: col.category || "measure",
+      measureKey: col.fieldKey,
+      measureLabel: col.label,
+      pivotKey: nodeId,
+      pivotValues: summaryPivotValues,
+      isColumnGroupSummary: true,
+      columnGroupNodeId: nodeId,
+      columnGroupHeaderRowOffset: headerRowOffset,
     };
   };
 
@@ -477,12 +576,131 @@ export function expandPivotedColumns(
     };
   };
 
+  const getMaxColVisibleLevel = (dl: RowGroupDisplayLevel): number => {
+    switch (dl) {
+      case "all_collapsed":
+        return 0;
+      case "level_1":
+        return 1;
+      case "level_2":
+        return 2;
+      case "level_3":
+        return 3;
+      case "all_expanded":
+      default:
+        return Number.POSITIVE_INFINITY;
+    }
+  };
+  const maxVisibleColLevel = getMaxColVisibleLevel(defaultColumnDisplayLevel);
+
+  const emitCohortHierarchy = (
+    cohorts: CohortInfo[],
+    headerRowOffset: number,
+    treeDepthLevel: number,
+    scopeId: string,
+    measuresToEmit: ColumnDefinition[]
+  ) => {
+    if (headerRowOffset >= pivotDepth - 1) {
+      for (const cohort of cohorts) {
+        for (const mCol of measuresToEmit) {
+          const mCohorts = cohortsByMeasure.get(mCol.fieldKey);
+          const match = mCohorts?.get(cohort.pivotKey) || cohort;
+          expandedColumns.push(createPivotCol(mCol, match));
+        }
+      }
+      return;
+    }
+
+    // Group contiguous cohorts sharing the same value at `headerRowOffset`
+    const groups: { label: string; items: CohortInfo[] }[] = [];
+    for (const c of cohorts) {
+      const val = c.pivotValues[headerRowOffset] ?? "";
+      const last = groups[groups.length - 1];
+      if (last && last.label === val) {
+        last.items.push(c);
+      } else {
+        groups.push({ label: val, items: [c] });
+      }
+    }
+
+    for (let gIdx = 0; gIdx < groups.length; gIdx++) {
+      const grp = groups[gIdx];
+      const distinctNextLevel = new Set(
+        grp.items.map((item) => item.pivotValues[headerRowOffset + 1] ?? "")
+      ).size;
+
+      // Always emit a collapsible summary node at the immediate parent of leaf level (`pivotDepth - 2`),
+      // or at higher levels when there are >= 2 distinct child groups underneath
+      const shouldEmitSummaryNode =
+        headerRowOffset === pivotDepth - 2 || distinctNextLevel >= 2;
+
+      if (shouldEmitSummaryNode) {
+        const nodeId = `colgrp:${scopeId}:${headerRowOffset}:${gIdx}:${grp.label}`;
+        const isExpanded = treeDepthLevel < maxVisibleColLevel;
+        const summaryColOffset = expandedColumns.length;
+        const parentVals = grp.items[0]?.pivotValues.slice(0, headerRowOffset) || [];
+
+        for (const mCol of measuresToEmit) {
+          expandedColumns.push(
+            createGroupSummaryCol(
+              mCol,
+              nodeId,
+              headerRowOffset,
+              grp.label,
+              isExpanded,
+              parentVals,
+              grp.items
+            )
+          );
+        }
+
+        const summaryColCount = measuresToEmit.length;
+        const childColStartOffset = expandedColumns.length;
+
+        emitCohortHierarchy(
+          grp.items,
+          headerRowOffset + 1,
+          treeDepthLevel + 1,
+          `${scopeId}_${gIdx}`,
+          measuresToEmit
+        );
+
+        const childColEndOffset = expandedColumns.length - 1;
+        if (childColEndOffset >= childColStartOffset) {
+          columnTreeNodes.push({
+            id: nodeId,
+            label: grp.label,
+            level: treeDepthLevel,
+            headerRowOffset,
+            summaryColOffset,
+            summaryColCount,
+            childColStartOffset,
+            childColEndOffset,
+            isExpanded,
+          });
+        }
+      } else {
+        emitCohortHierarchy(
+          grp.items,
+          headerRowOffset + 1,
+          treeDepthLevel,
+          `${scopeId}_${gIdx}`,
+          measuresToEmit
+        );
+      }
+    }
+  };
+
   if (pivotGroupMode === "cohort_first") {
-    for (const cohort of globalCohortOrder) {
-      for (const mCol of pivotedMeasureCols) {
-        const mCohorts = cohortsByMeasure.get(mCol.fieldKey);
-        const match = mCohorts?.get(cohort.pivotKey) || cohort;
-        expandedColumns.push(createPivotCol(mCol, match));
+    if (enableColumnGroups && pivotDepth >= 2) {
+      emitCohortHierarchy(globalCohortOrder, 0, 0, "cohort", pivotedMeasureCols);
+    } else {
+      for (const cohort of globalCohortOrder) {
+        for (const mCol of pivotedMeasureCols) {
+          const mCohorts = cohortsByMeasure.get(mCol.fieldKey);
+          const match = mCohorts?.get(cohort.pivotKey) || cohort;
+          expandedColumns.push(createPivotCol(mCol, match));
+        }
       }
     }
     if (anyRowTotal) {
@@ -494,8 +712,11 @@ export function expandPivotedColumns(
     // Default "measure_first" grouping
     for (const mCol of pivotedMeasureCols) {
       const mCohorts = cohortsByMeasure.get(mCol.fieldKey);
-      if (mCohorts) {
-        for (const cohort of mCohorts.values()) {
+      const cohortList = mCohorts ? Array.from(mCohorts.values()) : [];
+      if (enableColumnGroups && pivotDepth >= 2 && cohortList.length > 0) {
+        emitCohortHierarchy(cohortList, 0, 0, mCol.fieldKey, [mCol]);
+      } else {
+        for (const cohort of cohortList) {
           expandedColumns.push(createPivotCol(mCol, cohort));
         }
       }
@@ -505,13 +726,48 @@ export function expandPivotedColumns(
     }
   }
 
+  const unwrapNumericCell = (raw: any): number | null => {
+    if (raw === null || raw === undefined) return null;
+    if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
+    if (typeof raw === "object" && "value" in raw) {
+      const inner = raw.value;
+      if (typeof inner === "number" && Number.isFinite(inner)) return inner;
+      if (typeof inner === "string" && inner.trim() !== "") {
+        const parsed = Number(inner);
+        return Number.isFinite(parsed) ? parsed : null;
+      }
+      return null;
+    }
+    if (typeof raw === "string" && raw.trim() !== "") {
+      const parsed = Number(raw);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+    return null;
+  };
+
   return {
     expandedColumns,
+    columnTreeNodes,
     getValue: (row, col) => {
       const acc = pivotAccessorMap.get(col.fieldKey);
       if (acc) {
         if (acc.isRowTotal) {
           return row[acc.measureKey]?.["$$$_row_total_$$$"];
+        }
+        if (acc.summaryChildPaths && acc.summaryChildPaths.length > 0) {
+          const measureObj = row[acc.measureKey];
+          if (!measureObj || typeof measureObj !== "object") return null;
+          const nums: number[] = [];
+          for (const childPath of acc.summaryChildPaths) {
+            const rawLeaf = readNestedPath(measureObj, childPath);
+            const num = unwrapNumericCell(rawLeaf);
+            if (num !== null) {
+              nums.push(num);
+            }
+          }
+          if (nums.length === 0) return null;
+          const total = nums.reduce((accSum, v) => accSum + v, 0);
+          return acc.isAverageMeasure ? total / nums.length : total;
         }
         return readNestedPath(row[acc.measureKey], acc.path);
       }
@@ -603,10 +859,21 @@ export function buildCrosstabHeaderMatrix(
         runStart++;
         continue;
       }
+      const startColDef = expandedColumns[runStart];
+      const startIsSummaryAtOrBelow =
+        Boolean(startColDef?.isColumnGroupSummary) &&
+        (startColDef?.columnGroupHeaderRowOffset ?? 0) <= r;
       let runEnd = runStart + 1;
       while (
         runEnd < totalCols &&
         headerRows[r][runEnd] === val &&
+        // Never merge across a summary-to-child column boundary on the summary's own row or below
+        Boolean(
+          expandedColumns[runEnd]?.isColumnGroupSummary &&
+            (expandedColumns[runEnd]?.columnGroupHeaderRowOffset ?? 0) <= r
+        ) === startIsSummaryAtOrBelow &&
+        (!startIsSummaryAtOrBelow ||
+          expandedColumns[runEnd]?.columnGroupNodeId === startColDef?.columnGroupNodeId) &&
         // Only merge if all parent pivot rows above (0 .. r-1) also match
         Array.from({ length: r }, (_, pr) => headerRows[pr][runEnd] === headerRows[pr][runStart]).every(Boolean)
       ) {
@@ -1118,14 +1385,21 @@ export async function writeLookerDataToWorksheet(
   }
   const effectiveRows = matrix.rows;
   const baseColumns = resolveEffectiveColumnsForWrite(columns, options);
-  const { expandedColumns, getValue } = expandPivotedColumns(
+  const { expandedColumns, getValue, columnTreeNodes } = expandPivotedColumns(
     baseColumns,
     effectiveRows,
     options.pivots,
     options.includeRowTotals,
     options.pivotsMeta,
-    options.pivotGroupMode || "measure_first"
+    options.pivotGroupMode || "measure_first",
+    Boolean(options.enableColumnGroups),
+    options.defaultColumnDisplayLevel || "all_expanded"
   );
+  if (columnTreeNodes.length > 0) {
+    options.columnTreeNodes = columnTreeNodes;
+  } else {
+    options.columnTreeNodes = undefined;
+  }
   const colCount = Math.max(1, expandedColumns.length);
   const totalRows = effectiveRows.length;
   const batchSize = calculateBatchSize(colCount);
@@ -1217,19 +1491,33 @@ export async function writeLookerDataToWorksheet(
       let savedTableName: string | null = options.tableId || null;
       let pivotRanges: BoundingBox[] = [...(options.siblingTableRanges || [])];
 
-      if (!isCreatingNewSheet && prevTotalRows > 1) {
+      if (!isCreatingNewSheet && (prevTotalRows > 1 || prevTotalCols > 1)) {
         try {
           const prevDataRng = sheet.getRangeByIndexes(
             startRow + 1,
             startCol,
-            prevTotalRows,
+            Math.max(1, prevTotalRows),
             Math.max(1, prevTotalCols)
           );
           prevDataRng.rowHidden = false;
+          prevDataRng.columnHidden = false;
           prevDataRng.ungroup(Excel.GroupOption.byRows);
           await context.sync();
         } catch {
           // Ignore if no row groups existed
+        }
+        try {
+          const prevColRng = sheet.getRangeByIndexes(
+            startRow,
+            startCol,
+            Math.max(1, prevTotalRows + headerRowCount),
+            Math.max(1, prevTotalCols)
+          );
+          prevColRng.columnHidden = false;
+          prevColRng.ungroup(Excel.GroupOption.byColumns);
+          await context.sync();
+        } catch {
+          // Ignore if no column groups existed
         }
       }
 
@@ -1755,7 +2043,7 @@ export async function writeLookerDataToWorksheet(
         console.warn("Could not configure/resize native Excel table (ListObject):", err);
       }
 
-      // 5.5 Apply Semantic Styling for Row Totals, Subtotals, Row Outline Groups, and Grand Total
+      // 5.5 Apply Semantic Styling for Row Totals, Column Summary Groups, Subtotals, Row Outline Groups, and Grand Total
       try {
         if (totalRows > 0) {
           for (let c = 0; c < colCount; c++) {
@@ -1768,7 +2056,51 @@ export async function writeLookerDataToWorksheet(
               );
               rtColRng.format.font.bold = true;
               rtColRng.format.fill.color = "#F8F9FA";
+            } else if (expandedColumns[c]?.isColumnGroupSummary) {
+              const sumColRng = sheet.getRangeByIndexes(
+                startRow + headerRowCount,
+                startCol + c,
+                totalRows,
+                1
+              );
+              sumColRng.format.font.bold = true;
+              sumColRng.format.fill.color = "#F4F6F9";
             }
+          }
+        }
+
+        if (columnTreeNodes.length > 0) {
+          for (const colNode of columnTreeNodes) {
+            const childWidth = colNode.childColEndOffset - colNode.childColStartOffset + 1;
+            if (childWidth > 0) {
+              const colGrpRng = sheet.getRangeByIndexes(
+                tableHeaderStartRow,
+                startCol + colNode.childColStartOffset,
+                Math.max(1, tableHeaderRowCount + totalRows),
+                childWidth
+              );
+              colGrpRng.group(Excel.GroupOption.byColumns);
+            }
+          }
+
+          const colHiddenFlags = computeColumnTreeHiddenFlags(colCount, columnTreeNodes);
+          let cRunStart = 0;
+          while (cRunStart < colCount) {
+            const state = colHiddenFlags[cRunStart];
+            let cRunEnd = cRunStart;
+            while (cRunEnd + 1 < colCount && colHiddenFlags[cRunEnd + 1] === state) {
+              cRunEnd++;
+            }
+            if (state) {
+              const hideColRng = sheet.getRangeByIndexes(
+                tableHeaderStartRow,
+                startCol + cRunStart,
+                Math.max(1, tableHeaderRowCount + totalRows),
+                cRunEnd - cRunStart + 1
+              );
+              hideColRng.columnHidden = true;
+            }
+            cRunStart = cRunEnd + 1;
           }
         }
 
@@ -2152,4 +2484,232 @@ export async function setWorksheetBannerLoadingState(
   } catch {
     // Non-fatal if Excel runtime is unavailable
   }
+}
+
+/**
+ * Pure helper computing a boolean array of length `totalCols` indicating whether each
+ * column offset (`0 .. totalCols - 1`) should have `columnHidden = true` given the
+ * current expansion state of `columnTreeNodes`.
+ */
+export function computeColumnTreeHiddenFlags(
+  totalCols: number,
+  columnTreeNodes?: ColumnTreeNodeMeta[]
+): boolean[] {
+  const hidden = new Array(Math.max(0, totalCols)).fill(false);
+  if (!columnTreeNodes || columnTreeNodes.length === 0 || totalCols <= 0) {
+    return hidden;
+  }
+
+  const ordered = [...columnTreeNodes].sort((a, b) => a.level - b.level);
+  for (const node of ordered) {
+    if (!node.isExpanded) {
+      const start = Math.max(0, node.childColStartOffset);
+      const end = Math.min(totalCols - 1, node.childColEndOffset);
+      for (let c = start; c <= end; c++) {
+        hidden[c] = true;
+      }
+    }
+  }
+
+  return hidden;
+}
+
+/**
+ * Applies `columnHidden` runs and updates `▸` / `▾` parent cohort header cells in-place on the
+ * worksheet when a column hierarchy node or column display level is toggled.
+ */
+async function syncColumnTreeVisibilityToWorksheet(
+  targetSheetId: string | undefined,
+  options: WriteOptions,
+  totalRows: number,
+  colCount: number,
+  columnTreeNodes: ColumnTreeNodeMeta[],
+  focusAfterRowAndCol?: { row: number; col: number }
+): Promise<void> {
+  const { startRow, startCol } = parseCellAddress(options.anchorCell);
+  const {
+    bannerRowCount,
+    tableHeaderRowCount,
+    totalHeaderRowCount: headerRowCount,
+  } = getEffectiveHeaderRowCount(options);
+  const tableHeaderStartRow = startRow + bannerRowCount;
+  const useMultiRowHeader = Boolean(
+    options.useMultiRowCrosstabHeader && options.pivots && options.pivots.length > 0
+  );
+  const hiddenFlags = computeColumnTreeHiddenFlags(colCount, columnTreeNodes);
+
+  await Excel.run(async (context) => {
+    const sheet = targetSheetId
+      ? context.workbook.worksheets.getItem(targetSheetId)
+      : context.workbook.worksheets.getActiveWorksheet();
+
+    // 1. Update `▸` / `▾` labels in the crosstab or single-row header cells
+    for (const node of columnTreeNodes) {
+      const prefix = node.isExpanded ? "▾" : "▸";
+      if (useMultiRowHeader) {
+        const cell = sheet.getRangeByIndexes(
+          tableHeaderStartRow + node.headerRowOffset,
+          startCol + node.summaryColOffset,
+          1,
+          1
+        );
+        cell.values = [[`${prefix} ${node.label}`]];
+      } else {
+        const cell = sheet.getRangeByIndexes(
+          tableHeaderStartRow,
+          startCol + node.summaryColOffset,
+          1,
+          1
+        );
+        cell.load(["values"]);
+        await context.sync();
+        const currentHeader = String(cell.values?.[0]?.[0] ?? "");
+        const updatedHeader = currentHeader.replace(/[▾▸]\s*/g, `${prefix} `);
+        cell.values = [[updatedHeader !== currentHeader ? updatedHeader : `${prefix} ${node.label}`]];
+      }
+    }
+
+    // 2. Apply contiguous columnHidden runs across table columns
+    let runStart = 0;
+    while (runStart < colCount) {
+      const state = hiddenFlags[runStart];
+      let runEnd = runStart;
+      while (runEnd + 1 < colCount && hiddenFlags[runEnd + 1] === state) {
+        runEnd++;
+      }
+      const rng = sheet.getRangeByIndexes(
+        tableHeaderStartRow,
+        startCol + runStart,
+        Math.max(1, tableHeaderRowCount + totalRows),
+        runEnd - runStart + 1
+      );
+      rng.columnHidden = state;
+      runStart = runEnd + 1;
+    }
+
+    if (focusAfterRowAndCol) {
+      const nextFocus = sheet.getRangeByIndexes(
+        focusAfterRowAndCol.row,
+        focusAfterRowAndCol.col,
+        1,
+        1
+      );
+      nextFocus.select();
+    }
+
+    await context.sync();
+  });
+}
+
+/**
+ * Toggles a single parent column hierarchy cohort when the user clicks its `▾` / `▸` header cell
+ * in the worksheet, expanding/collapsing its child columns in-place without re-querying Looker.
+ */
+export async function toggleWorksheetColumnTreeNode(
+  targetSheetId: string | undefined,
+  options: WriteOptions,
+  totalRows: number,
+  clickedSheetRow0Based: number,
+  clickedSheetCol0Based: number
+): Promise<ColumnTreeNodeMeta[] | null> {
+  if (
+    !options.enableColumnGroups ||
+    !options.columnTreeNodes ||
+    options.columnTreeNodes.length === 0
+  ) {
+    return null;
+  }
+
+  const { startRow, startCol } = parseCellAddress(options.anchorCell);
+  const {
+    bannerRowCount,
+    totalHeaderRowCount: headerRowCount,
+  } = getEffectiveHeaderRowCount(options);
+  const tableHeaderStartRow = startRow + bannerRowCount;
+
+  if (
+    clickedSheetRow0Based < tableHeaderStartRow ||
+    clickedSheetRow0Based >= startRow + headerRowCount ||
+    clickedSheetCol0Based < startCol
+  ) {
+    return null;
+  }
+
+  const clickedHeaderRowOffset = clickedSheetRow0Based - tableHeaderStartRow;
+  const clickedColOffset = clickedSheetCol0Based - startCol;
+
+  let targetIdx = options.columnTreeNodes.findIndex(
+    (n) =>
+      n.headerRowOffset === clickedHeaderRowOffset &&
+      clickedColOffset >= n.summaryColOffset &&
+      clickedColOffset < n.summaryColOffset + Math.max(1, n.summaryColCount)
+  );
+
+  // Fallback: if single-row header or user clicked the summary column header cell on any header row
+  if (targetIdx === -1) {
+    targetIdx = options.columnTreeNodes.findIndex(
+      (n) =>
+        clickedColOffset >= n.summaryColOffset &&
+        clickedColOffset < n.summaryColOffset + Math.max(1, n.summaryColCount)
+    );
+  }
+
+  if (targetIdx === -1) {
+    return null;
+  }
+
+  const updatedNodes = options.columnTreeNodes.map((n, i) =>
+    i === targetIdx ? { ...n, isExpanded: !n.isExpanded } : { ...n }
+  );
+
+  const colCount = Math.max(2, options.prevColCount || 2);
+  await syncColumnTreeVisibilityToWorksheet(
+    targetSheetId,
+    options,
+    totalRows,
+    colCount,
+    updatedNodes,
+    {
+      row: Math.min(startRow + headerRowCount + Math.max(0, totalRows - 1), clickedSheetRow0Based + 1),
+      col: clickedSheetCol0Based,
+    }
+  );
+
+  return updatedNodes;
+}
+
+/**
+ * Expands or collapses all column hierarchy nodes in a pivoted crosstab worksheet table to the
+ * specified `displayLevel` (`all_collapsed`, `level_1`, `level_2`, `level_3`, `all_expanded`) in-place.
+ */
+export async function applyWorksheetColumnDisplayLevel(
+  targetSheetId: string | undefined,
+  options: WriteOptions,
+  totalRows: number,
+  displayLevel: RowGroupDisplayLevel
+): Promise<ColumnTreeNodeMeta[] | null> {
+  if (
+    !options.enableColumnGroups ||
+    !options.columnTreeNodes ||
+    options.columnTreeNodes.length === 0
+  ) {
+    return null;
+  }
+
+  const maxVisibleLevel = getMaxVisibleLevel(displayLevel);
+  const updatedNodes = options.columnTreeNodes.map((n) => ({
+    ...n,
+    isExpanded: n.level < maxVisibleLevel,
+  }));
+
+  const colCount = Math.max(2, options.prevColCount || 2);
+  await syncColumnTreeVisibilityToWorksheet(
+    targetSheetId,
+    options,
+    totalRows,
+    colCount,
+    updatedNodes
+  );
+
+  return updatedNodes;
 }

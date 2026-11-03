@@ -16,7 +16,7 @@ import {
   AccordionPanel,
 } from "@fluentui/react-components";
 import { TableSettingsRegular, TargetRegular } from "@fluentui/react-icons";
-import { WriteOptions, PivotGroupMode } from "../services/excelWriter";
+import { WriteOptions, PivotGroupMode, RowGroupDisplayLevel } from "../services/excelWriter";
 import { getActiveCellAddress } from "../services/sheetMetadata";
 
 const useStyles = makeStyles({
@@ -326,6 +326,59 @@ export const TableSettings: React.FC<TableSettingsProps> = ({
                       </div>
                     }
                   />
+                  {(pivots.length >= 2 || options.enableColumnGroups) && (
+                    <>
+                      <Checkbox
+                        checked={options.enableColumnGroups ?? false}
+                        onChange={(_, data) =>
+                          onOptionsChange({
+                            enableColumnGroups: !!data.checked,
+                            useMultiRowCrosstabHeader: data.checked
+                              ? true
+                              : options.useMultiRowCrosstabHeader,
+                          })
+                        }
+                        label={
+                          <div>
+                            <span style={{ fontSize: "12px", fontWeight: 600 }}>
+                              Enable Column Hierarchy Groups (Expand / Collapse)
+                            </span>
+                            <Caption1
+                              style={{ color: tokens.colorNeutralForeground3, display: "block" }}
+                            >
+                              Adds parent cohort summary columns (▾ Q1) with in-sheet click-to-collapse.
+                            </Caption1>
+                          </div>
+                        }
+                      />
+                      {options.enableColumnGroups && (
+                        <div
+                          style={{
+                            marginLeft: "28px",
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: "4px",
+                          }}
+                        >
+                          <Label size="small">Default Column Display Level</Label>
+                          <Select
+                            size="small"
+                            value={options.defaultColumnDisplayLevel || "all_expanded"}
+                            onChange={(_, data) =>
+                              onOptionsChange({
+                                defaultColumnDisplayLevel: data.value as RowGroupDisplayLevel,
+                              })
+                            }
+                          >
+                            <option value="all_collapsed">All Collapsed</option>
+                            <option value="level_1">Level 1</option>
+                            <option value="level_2">Level 2</option>
+                            <option value="all_expanded">All Expanded</option>
+                          </Select>
+                        </div>
+                      )}
+                    </>
+                  )}
                 </div>
               )}
 
