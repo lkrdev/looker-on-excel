@@ -311,7 +311,7 @@ export const TableSettings: React.FC<TableSettingsProps> = ({
                     </Select>
                   )}
                   <Checkbox
-                    checked={options.useMultiRowCrosstabHeader ?? false}
+                    checked={options.useMultiRowCrosstabHeader ?? true}
                     onChange={(_, data) =>
                       onOptionsChange({ useMultiRowCrosstabHeader: !!data.checked })
                     }

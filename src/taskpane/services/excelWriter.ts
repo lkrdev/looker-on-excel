@@ -84,7 +84,9 @@ export function getEffectiveHeaderRowCount(options?: WriteOptions): {
 } {
   const bannerRowCount = options?.showSourceBanner ? 1 : 0;
   const useMultiRowHeader = Boolean(
-    options?.useMultiRowCrosstabHeader && options?.pivots && options.pivots.length > 0
+    (options?.useMultiRowCrosstabHeader ?? true) &&
+      options?.pivots &&
+      options.pivots.length > 0
   );
   const tableHeaderRowCount = useMultiRowHeader ? (options?.pivots?.length || 1) + 1 : 1;
   return {
@@ -1130,7 +1132,9 @@ export async function writeLookerDataToWorksheet(
   const nullVal = options.nullDisplay ?? "";
   const hasSubtotals = matrix.subtotalRowIndices.length > 0;
   const useMultiRowHeader = Boolean(
-    options.useMultiRowCrosstabHeader && options.pivots && options.pivots.length > 0
+    (options.useMultiRowCrosstabHeader ?? true) &&
+      options.pivots &&
+      options.pivots.length > 0
   );
   const {
     bannerRowCount,
@@ -1625,7 +1629,7 @@ export async function writeLookerDataToWorksheet(
         lookerTopHeader.format.font.bold = true;
         lookerTopHeader.format.fill.color = "#1D5288";
         lookerTopHeader.format.font.color = "#FFFFFF";
-        lookerTopHeader.format.horizontalAlignment = Excel.HorizontalAlignment.center;
+        lookerTopHeader.format.horizontalAlignment = Excel.HorizontalAlignment.left;
 
         // Right-align top-left corner cells holding the pivoted dimension names (e.g. Version, Time)
         const firstPivotColIdx = expandedColumns.findIndex(

@@ -120,6 +120,7 @@ export const App: React.FC = () => {
     includeRowTotals: false,
     includeSubtotals: false,
     showSourceBanner: true,
+    useMultiRowCrosstabHeader: true,
     anchorCell: "A1",
   });
 
