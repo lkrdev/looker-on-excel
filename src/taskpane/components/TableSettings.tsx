@@ -44,6 +44,7 @@ interface TableSettingsProps {
   onOptionsChange: (updates: Partial<WriteOptions>) => void;
   pivots?: string[];
   selectedMeasureLabels?: string[];
+  embedded?: boolean;
 }
 
 export const TableSettings: React.FC<TableSettingsProps> = ({
@@ -55,6 +56,7 @@ export const TableSettings: React.FC<TableSettingsProps> = ({
   onOptionsChange,
   pivots = [],
   selectedMeasureLabels = [],
+  embedded = false,
 }) => {
   const styles = useStyles();
   const PRESET_LIMITS = ["500", "2000", "10000", "25000", "50000", "100000", "-1"];
@@ -66,7 +68,7 @@ export const TableSettings: React.FC<TableSettingsProps> = ({
 
   return (
     <div className={styles.container}>
-      <Accordion collapsible defaultOpenItems={[]}>
+      <Accordion collapsible defaultOpenItems={embedded ? ["settings"] : []}>
         <AccordionItem value="settings">
           <AccordionHeader size="small" icon={<TableSettingsRegular />}>
             Table & Streaming Settings

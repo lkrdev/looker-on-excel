@@ -1,6 +1,6 @@
 # Looker Microsoft Excel Add-in
 
-Enterprise Microsoft Excel Taskpane and Custom Functions Add-in (Office.js) connecting Excel workbooks directly to Looker's semantic modeling layer. It enables business users, financial analysts, and data teams to authenticate via Looker OAuth 2.0 PKCE, explore models and views, import Saved Looks and Dashboard tiles, evaluate non-additive Looker SQL totals and subtotals, navigate collapsible Row Group hierarchies, build multi-dimension crosstabs, call live `=LOOKER.VALUE()` and `=LOOKER.QUERY()` worksheet formulas, and stream high-volume datasets into Excel worksheets with one-click refresh and formatting preservation.
+Enterprise Microsoft Excel Taskpane and Custom Functions Add-in (Office.js) connecting Excel workbooks directly to Looker's semantic modeling layer. It enables business users, financial analysts, and data teams to authenticate via Looker OAuth 2.0 PKCE, design multi-dimensional reports using a 3-tab Pivot Designer (`Builder` | `Number Format` | `Styling`) with structured Rows, Columns, and Filter buckets, import Saved Looks and Dashboard tiles, evaluate non-additive Looker SQL totals and subtotals, navigate collapsible Row and Column Group hierarchies, build multi-dimension crosstabs with source metadata banners, apply per-measure number formatting overrides, call live `=LOOKER.VALUE()` and `=LOOKER.QUERY()` worksheet formulas, and stream high-volume datasets into Excel worksheets with one-click refresh and formatting preservation.
 
 ---
 
@@ -68,14 +68,33 @@ flowchart TD
 ### Hierarchy Discovery & Indented Row Groups Tree
 
 - **LookML Hierarchy Discovery**: Automatically resolves multi-level hierarchies from LookML field tags (`hierarchy:<group>:<level>` and `drill_next:<field>`), `dimension_group` calendar time ladders (`Year -> Quarter -> Month -> Week -> Date`, excluding sub-day raw/time grains), and `drill_fields` dimension chains.
-- **Compact Single-Column Hierarchy Tree**: Mirrors Looker Explore Row Groups and SAP Analysis for Office compact hierarchy display by collapsing grouped dimensions into a single indented `Group` column with expand/collapse indicators (`▾` / `▸`), direct child counts `(N)`, and top-down Looker SQL subtotals on parent nodes.
+- **Compact Single-Column Hierarchy Tree**: Mirrors Looker Explore Row Groups compact hierarchy display by collapsing grouped dimensions into a single indented `Group` column with expand/collapse indicators (`▾` / `▸`), direct child counts `(N)`, and top-down Looker SQL subtotals on parent nodes.
 - **In-Sheet Click-to-Expand & Display Levels**: Clicking any `▸` or `▾` group cell in the worksheet (or changing the Display Level selector between `All Collapsed`, `Level 1`, `Level 2`, `Level 3`, and `All Expanded`) toggles row visibility in-place without re-querying the warehouse.
 
-### Multi-Dimension Pivots & Crosstabs
+### Multi-Dimension Pivots, Crosstabs & Column Hierarchies
 
 - **Multi-Dimension Column Pivots**: Supports pivoting one or multiple dimensions simultaneously (`pivotsMeta` cohort combinations) while resolving clean display labels for dimensions backed by LookML `case:` or `order_by_field` sort keys.
 - **Measure-First vs. Pivot-Value-First Grouping**: When multiple measures are pivoted, dynamically groups columns either by Measure first (`Measure A [Pivots], Measure B [Pivots]`) or by Pivot Cohort first (`Pivot 1 [Measure A, Measure B]`).
-- **Multi-Row Merged Crosstab Headers**: Optionally renders stacked multi-row crosstab headers with merged Excel cells (`range.merge()`) above measure sub-headers, plus one-click **Swap Rows & Columns** axis transposition.
+- **Multi-Row Merged Crosstab Headers & Corner Pivot Labels**: Renders stacked multi-row crosstab headers by default with merged Excel cells (`range.merge()`) above measure sub-headers, left-aligned pivot headers, displays right-aligned pivot dimension labels in the top-left corner cells (`Version`, `Time`), and supports one-click **Swap Rows & Columns** axis transposition.
+- **Interactive Column Hierarchy Expand / Collapse**: Enables collapsible parent cohort summary columns (`▾ Q1 (2021)` / `▸ Q1 (2021)` or `▾ Men` / `▸ Men`) across multi-level column pivots (`enableColumnGroups`):
+  - **Unmerged Parent Summary Headers**: Keeps parent cohort summary columns structurally distinct from collapsible child columns in the header grid, preventing Excel range selections on the parent from selecting hidden child columns.
+  - **In-Sheet Click-to-Toggle**: Clicking directly on any parent cohort header cell (`▾` or `▸`) in the worksheet dynamically toggles between expanded and collapsed child column visibility without re-querying Looker.
+  - **Column Display Level Selector**: Choose `All Collapsed`, `Level 1`, `Level 2`, `Level 3`, or `All Expanded` in Table Settings to set default or active column drill depth.
+  - **Additive Measure Rollups**: Parent summary columns aggregate child cohorts for additive LookML measure types (`sum`, `sum_distinct`, `count`, `running_total`) via `isAdditiveMeasure`, while gracefully displaying blank cells (`null`) for non-additive measures (`count_distinct`, `average`, `median`, `percentile`, `min`, `max`, and `number` ratios) to ensure accurate reporting.
+
+### Source Information Banner Row & 3-Tab Pivot Designer Taskpane
+
+- **Source Information Banner Row (`showSourceBanner`)**: Renders a merged, styled title banner row directly above the table headers (`Operating_Income_JB` or `Model · Explore`):
+  - **Dynamic Warehouse Refresh State**: Automatically transitions to `Loading... <Title>` in italic during background query execution, restoring standard styling upon query completion.
+  - **Grid Layout Offsets**: Automatically accounts for the banner row height when computing native Excel Table (`ListObject`) boundaries, freeze pane splits, anchor cell addresses, and multi-table sibling bounding boxes.
+- **3-Tab Pivot Designer (`Builder` | `Number Format` | `Styling`)**:
+  - **Builder Tab**: Organizes query fields into dedicated **Rows**, **Columns**, and **Filter** buckets above a categorized Field Catalog:
+    - **Rows Bucket**: Holds non-pivoted row dimensions with quick sort (`↑`/`↓`) and remove buttons.
+    - **Columns Bucket**: Houses pivot dimensions alongside a dedicated, draggable **Measures** token. Reordering the Measures token before or after pivot dimensions visually toggles between **Measure-First** (`Measure [Pivots]`) and **Pivot-Cohort-First** (`Pivot [Measures]`) crosstab grouping.
+    - **Filter Bucket**: Displays active filter conditions with direct access to operator and value editing.
+    - **Searchable Field Catalog**: Instant search across labels, short labels, view labels, field groups, and LookML synonyms, filtered with `All` / `Dimensions` / `Measures` category pills.
+  - **Number Format Tab**: Provides per-measure Excel number format overrides (`Currency`, `Whole Currency`, `Integer`, `Decimal`, `Percent`, or `LookML Default`) and custom `Null / Empty Value Display` configuration (`-`, `N/A`, `None`, or empty string).
+  - **Styling Tab**: Houses destination anchor cell controls, Source Banner toggles, Excel Table styling, Looker SQL Totals/Subtotals, and Crosstab layout options.
 
 ### Multiple Tables per Worksheet & Custom Start Cell Anchor
 
@@ -218,20 +237,22 @@ The dev server starts on `https://localhost:3000`. You can verify by opening `ht
 
 1. **Authenticate**:
    - Enter your Looker instance URL (e.g. `https://<your-instance>.cloud.looker.com`) and registered OAuth Client ID (e.g. `looker-excel`).
-   - Click Sign in with Looker and complete the authentication flow in the popup dialog.
+   - Click **Sign in with Looker** and complete the authentication flow in the popup dialog.
 2. **Choose Mode (`Explore` | `Looks` | `Dashboards`)**:
-   - **Explore**: Select a Model and Explore view, pick Dimensions and Measures, toggle `+Pivot` or sort arrows (`↑`/`↓`) on selected field chips, or expand **Hierarchies & Row Grouping** below the views list to enable a collapsible indented hierarchy tree.
+   - **Explore**: Select a Model and Explore view to open the 3-tab Pivot Designer:
+     - **Builder Tab**: Add fields into structured **Rows**, **Columns**, or **Filter** buckets from the categorized Field Catalog. Reorder the **Measures** token in the Columns bucket to switch between Measure-First and Pivot-Cohort-First grouping, set sort directions, and configure prompts.
+     - **Number Format Tab**: Apply custom Excel number formatting overrides to individual measures (`Currency`, `Whole Currency`, `Integer`, `Decimal`, `Percent`, or `LookML Default`) and configure custom null display text.
+     - **Styling Tab**: Set custom start cell anchors, source metadata banner toggles, Excel table styles, grand total/subtotal options, and crosstab layout settings.
    - **Looks**: Search Saved Looks and click **Import** to stream into Excel or **Edit in Explore** to customize fields and filters.
    - **Dashboards**: Select a Dashboard, adjust dashboard-level filters if needed, and import individual tiles or click **Import All Tiles** to generate a multi-sheet report.
-3. **Configure Table & Layout Settings**:
-   - Set the row limit, destination worksheet, and custom **Start Cell** anchor (e.g. `A1`, `H1`, `B25` or **Use Selected Cell**) to place multiple tables on a single sheet.
-   - Enable **Column Grand Totals**, **Row Totals**, or **Dimension Subtotals** to evaluate non-additive aggregations in Looker SQL.
-   - When pivoting, configure **Crosstab & Pivot Layout** (Measure-First vs. Pivot-Value-First column ordering and Multi-Row Merged Crosstab Headers).
+3. **Execute & Expand Hierarchies**:
+   - Click **Run & Import** to stream data into the active worksheet.
+   - When a source information banner is enabled, the top row displays the model/explore source and updates to `Loading... <Title>` in italic during refreshes.
+   - Click any `▸` or `▾` cell directly in the worksheet grid to expand or collapse Row Group hierarchies or multi-level Column pivot groups.
 4. **Use Custom Worksheet Functions**:
    - In any cell, type `=LOOKER.VALUE("model_name", "explore_name", "view.measure", "view.dimension", "filter_value")` to pull live governed KPIs, or `=LOOKER.QUERY("model_name", "explore_name", "view.dim,view.measure", "{\"view.status\":\"Complete\"}", "view.measure desc", 100)` to spill a dynamic array.
-5. **Refresh & Interact In-Sheet**:
-   - Click any `▸` or `▾` cell in a Row Group hierarchy column to expand or collapse branches directly in the sheet.
-   - Use **Refresh Table** to update the selected table or **Refresh All** in the header to refresh all Looker tables and custom functions across the workbook.
+5. **Refresh & Maintain Formatting**:
+   - Use **Refresh Table** to update the selected table or **Refresh All** in the header to refresh all Looker tables and custom functions across the workbook while preserving adjacent formulas and formatting.
 
 ---
 
@@ -320,11 +341,14 @@ Run individual feature test suites directly:
 
 ```bash
 npx tsx tests/totalsAndSubtotals.test.ts
-npx tsx tests/multiTableAndAnchors.test.ts
+npx tsx tests/multiTableMetadata.test.ts
 npx tsx tests/customFunctionsBatcher.test.ts
 npx tsx tests/looksAndDashboards.test.ts
 npx tsx tests/hierarchyResolver.test.ts
-npx tsx tests/pivotsAndSorts.test.ts
+npx tsx tests/crosstabMultiPivot.test.ts
+npx tsx tests/sourceBannerAndCornerLabels.test.ts
+npx tsx tests/columnHierarchyDrill.test.ts
+npx tsx tests/designerBucketsAndFormatting.test.ts
 ```
 
 Compile production distribution:
