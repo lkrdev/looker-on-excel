@@ -34,13 +34,23 @@ console.log("Running Feature 7 (Source Information Banner Row & Crosstab Corner 
 
   const crosstabWithBanner = getEffectiveHeaderRowCount({
     showSourceBanner: true,
-    useMultiRowCrosstabHeader: true,
     pivots: ["orders.version", "orders.quarter"],
   });
   assert.deepEqual(crosstabWithBanner, {
     bannerRowCount: 1,
-    tableHeaderRowCount: 3, // 2 pivot rows + 1 measure row
+    tableHeaderRowCount: 3, // 2 pivot rows + 1 measure row (useMultiRowCrosstabHeader defaults to true)
     totalHeaderRowCount: 4,
+  });
+
+  const crosstabExplicitOff = getEffectiveHeaderRowCount({
+    showSourceBanner: true,
+    useMultiRowCrosstabHeader: false,
+    pivots: ["orders.version", "orders.quarter"],
+  });
+  assert.deepEqual(crosstabExplicitOff, {
+    bannerRowCount: 1,
+    tableHeaderRowCount: 1,
+    totalHeaderRowCount: 2,
   });
 }
 
